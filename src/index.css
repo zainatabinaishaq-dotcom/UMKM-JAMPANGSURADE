@@ -100,7 +100,7 @@ textarea.form-input { resize: vertical; min-height: 90px; }
 
 /* ── DASHBOARD ── */
 .dash-layout { display: flex; min-height: calc(100vh - 110px); }
-.dash-sidebar { width: 220px; flex-shrink: 0; background: var(--white); border-right: 1px solid var(--border); padding: 20px 0; }
+.dash-sidebar { width: 220px; flex-shrink: 0; background: var(--white); border-right: 1px solid var(--border); padding: 20px 0; display: flex; flex-direction: column; }
 .dash-sidebar-item { display: flex; align-items: center; gap: 10px; padding: 14px 20px; font-size: 14px; font-weight: 500; color: var(--text2); cursor: pointer; transition: all 0.15s; border-left: 3px solid transparent; }
 .dash-sidebar-item:hover { background: var(--orange-light); color: var(--orange); }
 .dash-sidebar-item.active { background: var(--orange-light); color: var(--orange); border-left-color: var(--orange); }
@@ -261,6 +261,8 @@ textarea.form-input { resize: vertical; min-height: 90px; }
   .dash-sidebar-item { flex-direction: column; gap: 4px; padding: 10px 14px; font-size: 11px; border-left: none; border-bottom: 3px solid transparent; white-space: nowrap; min-width: 72px; align-items: center; }
   .dash-sidebar-item.active { border-left-color: transparent; border-bottom-color: var(--orange); background: var(--orange-light); }
   .dash-sidebar-item span:first-child { font-size: 20px; }
+  .dash-logout-btn-wrap { padding: 8px !important; margin-top: 0 !important; display: flex; align-items: center; }
+  .dash-logout-btn-wrap button { padding: 8px 12px !important; font-size: 11px !important; white-space: nowrap; }
   .dash-content { padding: 14px; padding-bottom: calc(var(--bottom-nav-height) + 16px); }
 
   /* Tables → hidden or scrollable */

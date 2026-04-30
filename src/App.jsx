@@ -374,17 +374,20 @@ export default function App() {
       {page === "buyer" && profile?.role === "buyer" && (
         <BuyerDashboard user={user} profile={profile} orders={orders.filter((o) => o.buyerId === user.uid)}
           products={activeProducts} paymentSetting={paymentSetting} createNotif={createNotif}
-          onAddToCart={addToCart} onProductClick={setSelectedProduct} setPage={navGoTo} />
+          onAddToCart={addToCart} onProductClick={setSelectedProduct} setPage={navGoTo}
+          onLogout={() => { signOut(auth); navGoTo("home"); }} />
       )}
       {page === "seller" && profile?.role === "seller" && (
         <SellerDashboard user={user} profile={profile}
           products={products.filter((p) => p.sellerId === user.uid)}
           orders={orders.filter((o) => o.sellerId === user.uid)}
-          wallets={wallets} createNotif={createNotif} />
+          wallets={wallets} createNotif={createNotif}
+          onLogout={() => { signOut(auth); navGoTo("home"); }} />
       )}
       {page === "admin" && (profile?.role === "admin" || profile?.role === "sub_admin") && (
         <AdminDashboard profile={profile} products={products} orders={orders} withdrawals={withdrawals}
-          paymentSetting={paymentSetting} manualBalance={manualBalance} wallets={wallets} createNotif={createNotif} />
+          paymentSetting={paymentSetting} manualBalance={manualBalance} wallets={wallets} createNotif={createNotif}
+          onLogout={() => { signOut(auth); navGoTo("home"); }} />
       )}
       {page === "notif" && user && (
         <NotificationPage notifications={notifications} />
@@ -901,7 +904,7 @@ function CheckoutModal({ cart, user, profile, onClose, onSuccess, createNotif })
 }
 
 /* ─── BUYER DASHBOARD ────────────────────────── */
-function BuyerDashboard({ user, profile, orders, products, paymentSetting, createNotif, onAddToCart, onProductClick, setPage }) {
+function BuyerDashboard({ user, profile, orders, products, paymentSetting, createNotif, onAddToCart, onProductClick, setPage, onLogout }) {
   const [tab, setTab] = useState("beranda");
   const tabs = [
     { id: "beranda", label: "Beranda", icon: "🏠" },
@@ -927,6 +930,11 @@ function BuyerDashboard({ user, profile, orders, products, paymentSetting, creat
         ))}
         <div className="dash-sidebar-item" onClick={() => setPage("home")}>
           <span>🛍️</span> Lanjut Belanja
+        </div>
+        <div className="dash-logout-btn-wrap" style={{ padding: "8px 12px", marginTop: "auto" }}>
+          <button onClick={onLogout} style={{ width: "100%", padding: "10px 14px", background: "#FEF2F2", color: "#EF4444", border: "1px solid #FECACA", borderRadius: 8, cursor: "pointer", fontWeight: 600, fontSize: 13, display: "flex", alignItems: "center", gap: 8, justifyContent: "center" }}>
+            🚪 Keluar
+          </button>
         </div>
       </div>
       <div className="dash-content">
@@ -1125,7 +1133,7 @@ function BuyerProfile({ profile }) {
 }
 
 /* ─── SELLER DASHBOARD ───────────────────────── */
-function SellerDashboard({ user, profile, products, orders, wallets, createNotif }) {
+function SellerDashboard({ user, profile, products, orders, wallets, createNotif, onLogout }) {
   const [tab, setTab] = useState("beranda");
   const wallet = wallets.find((w) => w.sellerId === user.uid);
   const tabs = [
@@ -1152,6 +1160,11 @@ function SellerDashboard({ user, profile, products, orders, wallets, createNotif
             <span>{t.icon}</span> {t.label}
           </div>
         ))}
+        <div className="dash-logout-btn-wrap" style={{ padding: "8px 12px", marginTop: "auto" }}>
+          <button onClick={onLogout} style={{ width: "100%", padding: "10px 14px", background: "#FEF2F2", color: "#EF4444", border: "1px solid #FECACA", borderRadius: 8, cursor: "pointer", fontWeight: 600, fontSize: 13, display: "flex", alignItems: "center", gap: 8, justifyContent: "center" }}>
+            🚪 Keluar
+          </button>
+        </div>
       </div>
       <div className="dash-content">
         {tab === "beranda" && (
@@ -1468,7 +1481,7 @@ function Withdraw({ user, profile, wallet, createNotif }) {
 }
 
 /* ─── ADMIN DASHBOARD ────────────────────────── */
-function AdminDashboard({ profile, products, orders, withdrawals, paymentSetting, manualBalance, wallets, createNotif }) {
+function AdminDashboard({ profile, products, orders, withdrawals, paymentSetting, manualBalance, wallets, createNotif, onLogout }) {
   const [tab, setTab] = useState("order");
   const autoBalance = wallets.reduce((sum, w) => sum + Number(w.saldoTersedia || 0), 0);
   const displayedBalance = manualBalance?.isManualBalanceActive ? Number(manualBalance.totalSellerBalanceManual || 0) : autoBalance;
@@ -1502,6 +1515,11 @@ function AdminDashboard({ profile, products, orders, withdrawals, paymentSetting
             <span>{t.icon}</span> {t.label}
           </div>
         ))}
+        <div className="dash-logout-btn-wrap" style={{ padding: "8px 12px", marginTop: "auto" }}>
+          <button onClick={onLogout} style={{ width: "100%", padding: "10px 14px", background: "#FEF2F2", color: "#EF4444", border: "1px solid #FECACA", borderRadius: 8, cursor: "pointer", fontWeight: 600, fontSize: 13, display: "flex", alignItems: "center", gap: 8, justifyContent: "center" }}>
+            🚪 Keluar
+          </button>
+        </div>
       </div>
       <div className="dash-content">
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 14, marginBottom: 24 }}>
