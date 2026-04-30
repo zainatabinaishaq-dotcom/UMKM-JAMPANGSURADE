@@ -4,6 +4,7 @@ import {
   signInWithEmailAndPassword,
   signOut,
   onAuthStateChanged,
+  sendPasswordResetEmail,
 } from "firebase/auth";
 import {
   addDoc,
@@ -11,6 +12,7 @@ import {
   deleteDoc,
   doc,
   getDoc,
+  getDocs,
   increment,
   onSnapshot,
   orderBy,
@@ -23,18 +25,57 @@ import {
 import { auth, db } from "./services/firebase";
 import { uploadImageToCloudinary } from "./services/cloudinary";
 
-const rupiah = (n) => `Rp${Number(n || 0).toLocaleString("id-ID")}`;
+const complaintEmail = "umkmdigitalecommerce@gmail.com";
 
-function cleanWa(number) {
-  let clean = String(number || "").replace(/\D/g, "");
-  if (clean.startsWith("0")) clean = "62" + clean.slice(1);
-  return clean;
-}
+const rupiah = (n) => `Rp${Number(n || 0).toLocaleString("id-ID")}`;
 
 function calcCommission(total, type, value) {
   if (type === "percent") return Math.round(total * (Number(value || 0) / 100));
   if (type === "fixed") return Number(value || 0);
   return 0;
+}
+
+function calculateDistanceKm(lat1, lon1, lat2, lon2) {
+  const R = 6371;
+  const dLat = ((Number(lat2) - Number(lat1)) * Math.PI) / 180;
+  const dLon = ((Number(lon2) - Number(lon1)) * Math.PI) / 180;
+
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos((Number(lat1) * Math.PI) / 180) *
+      Math.cos((Number(lat2) * Math.PI) / 180) *
+      Math.sin(dLon / 2) *
+      Math.sin(dLon / 2);
+
+  return R * (2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)));
+}
+
+function calculateSameDayShipping(distanceKm) {
+  if (distanceKm <= 40) return 10000;
+  return 10000 + Math.ceil(distanceKm - 40) * 2000;
+}
+
+async function getOngkirAPI(originCityId, destinationCityId, weightGram, courier) {
+  const res = await fetch("/api/ongkir", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      origin: originCityId,
+      destination: destinationCityId,
+      weight: weightGram,
+      courier,
+    }),
+  });
+
+  const data = await res.json();
+
+  if (!data.rajaongkir?.results?.[0]?.costs) {
+    throw new Error("Ongkir gagal dihitung. Cek kurir atau ID kota.");
+  }
+
+  return data.rajaongkir.results[0].costs;
 }
 
 export default function App() {
@@ -46,6 +87,8 @@ export default function App() {
   const [notifications, setNotifications] = useState([]);
   const [withdrawals, setWithdrawals] = useState([]);
   const [paymentSetting, setPaymentSetting] = useState(null);
+  const [manualBalance, setManualBalance] = useState(null);
+  const [wallets, setWallets] = useState([]);
   const [loading, setLoading] = useState(true);
 
   async function createNotif(data) {
@@ -74,12 +117,7 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    const qProducts = query(
-      collection(db, "products"),
-      orderBy("createdAt", "desc")
-    );
-
-    const unsub = onSnapshot(qProducts, (snap) => {
+    const unsub = onSnapshot(collection(db, "products"), (snap) => {
       setProducts(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
     });
 
@@ -103,8 +141,24 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    const unsub = onSnapshot(collection(db, "seller_wallets"), (snap) => {
+      setWallets(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
+    });
+
+    return () => unsub();
+  }, []);
+
+  useEffect(() => {
     const unsub = onSnapshot(doc(db, "admin_settings", "payment"), (snap) => {
       setPaymentSetting(snap.exists() ? snap.data() : null);
+    });
+
+    return () => unsub();
+  }, []);
+
+  useEffect(() => {
+    const unsub = onSnapshot(doc(db, "admin_settings", "manualBalance"), (snap) => {
+      setManualBalance(snap.exists() ? snap.data() : null);
     });
 
     return () => unsub();
@@ -114,7 +168,7 @@ export default function App() {
     if (!profile || !user) return;
 
     const qNotif =
-      profile.role === "admin"
+      profile.role === "admin" || profile.role === "sub_admin"
         ? query(collection(db, "notifications"), where("role", "==", "admin"))
         : query(collection(db, "notifications"), where("userId", "==", user.uid));
 
@@ -146,15 +200,15 @@ export default function App() {
           {!user && <button onClick={() => setPage("login")}>Login</button>}
           {!user && <button onClick={() => setPage("register")}>Daftar</button>}
 
-          {profile?.role === "seller" && (
-            <button onClick={() => setPage("seller")}>Seller</button>
-          )}
-
           {profile?.role === "buyer" && (
             <button onClick={() => setPage("buyer")}>Customer</button>
           )}
 
-          {profile?.role === "admin" && (
+          {profile?.role === "seller" && (
+            <button onClick={() => setPage("seller")}>Seller</button>
+          )}
+
+          {(profile?.role === "admin" || profile?.role === "sub_admin") && (
             <button onClick={() => setPage("admin")}>Admin</button>
           )}
 
@@ -162,22 +216,11 @@ export default function App() {
         </div>
       </nav>
 
-      {page === "home" && (
-        <Home products={activeProducts} setPage={setPage} user={user} />
-      )}
+      {page === "home" && <Home products={activeProducts} setPage={setPage} user={user} />}
 
       {page === "login" && <Login setPage={setPage} />}
-      {page === "register" && <Register setPage={setPage} />}
 
-      {page === "seller" && profile?.role === "seller" && (
-        <SellerDashboard
-          user={user}
-          profile={profile}
-          products={products}
-          orders={orders}
-          createNotif={createNotif}
-        />
-      )}
+      {page === "register" && <Register setPage={setPage} createNotif={createNotif} />}
 
       {page === "buyer" && profile?.role === "buyer" && (
         <BuyerDashboard
@@ -189,12 +232,25 @@ export default function App() {
         />
       )}
 
-      {page === "admin" && profile?.role === "admin" && (
+      {page === "seller" && profile?.role === "seller" && (
+        <SellerDashboard
+          user={user}
+          profile={profile}
+          products={products}
+          orders={orders}
+          createNotif={createNotif}
+        />
+      )}
+
+      {page === "admin" && (profile?.role === "admin" || profile?.role === "sub_admin") && (
         <AdminDashboard
+          profile={profile}
           products={products}
           orders={orders}
           withdrawals={withdrawals}
           paymentSetting={paymentSetting}
+          manualBalance={manualBalance}
+          wallets={wallets}
           createNotif={createNotif}
         />
       )}
@@ -202,6 +258,10 @@ export default function App() {
       {page === "notif" && user && (
         <NotificationPage notifications={notifications} />
       )}
+
+      <footer style={styles.footer}>
+        Kontak pengaduan: {complaintEmail}
+      </footer>
     </div>
   );
 }
@@ -223,9 +283,7 @@ function Home({ products, setPage, user }) {
       <h2>Produk UMKM</h2>
 
       <div style={styles.grid}>
-        {products.map((p) => (
-          <ProductCard key={p.id} product={p} />
-        ))}
+        {products.map((p) => <ProductCard key={p.id} product={p} />)}
       </div>
     </main>
   );
@@ -238,9 +296,7 @@ function ProductCard({ product }) {
       <h3>{product.productName}</h3>
       <p>{product.category}</p>
       <b>{rupiah(product.price)}</b>
-      <p>
-        ⭐ {product.averageRating || 0} | {product.totalReviews || 0} ulasan
-      </p>
+      <p>⭐ {product.averageRating || 0} | {product.totalReviews || 0} ulasan</p>
     </div>
   );
 }
@@ -255,21 +311,28 @@ function Login({ setPage }) {
     setPage("home");
   }
 
+  async function resetPassword() {
+    if (!email) {
+      alert("Masukkan email dulu");
+      return;
+    }
+
+    await sendPasswordResetEmail(auth, email);
+    alert("Link reset password dikirim ke email");
+  }
+
   return (
     <form style={styles.form} onSubmit={login}>
       <h2>Login</h2>
-      <input placeholder="Email" onChange={(e) => setEmail(e.target.value)} />
-      <input
-        placeholder="Password"
-        type="password"
-        onChange={(e) => setPassword(e.target.value)}
-      />
+      <input placeholder="Email" value={email} onChange={(e) => setEmail(e.target.value)} />
+      <input placeholder="Password" type="password" value={password} onChange={(e) => setPassword(e.target.value)} />
       <button style={styles.primary}>Login</button>
+      <button type="button" onClick={resetPassword}>Lupa Password?</button>
     </form>
   );
 }
 
-function Register({ setPage }) {
+function Register({ setPage, createNotif }) {
   const [form, setForm] = useState({
     name: "",
     email: "",
@@ -281,11 +344,7 @@ function Register({ setPage }) {
   async function register(e) {
     e.preventDefault();
 
-    const res = await createUserWithEmailAndPassword(
-      auth,
-      form.email,
-      form.password
-    );
+    const res = await createUserWithEmailAndPassword(auth, form.email, form.password);
 
     await setDoc(doc(db, "users", res.user.uid), {
       uid: res.user.uid,
@@ -300,10 +359,19 @@ function Register({ setPage }) {
     if (form.role === "seller") {
       await setDoc(doc(db, "seller_wallets", res.user.uid), {
         sellerId: res.user.uid,
+        sellerName: form.name,
         saldoTersedia: 0,
         saldoTertahan: 0,
         totalPenjualan: 0,
         totalDitarik: 0,
+      });
+
+      await createNotif({
+        role: "admin",
+        type: "seller_register",
+        title: "Seller Baru",
+        message: `${form.name} mendaftar sebagai seller`,
+        userId: res.user.uid,
       });
     }
 
@@ -314,27 +382,10 @@ function Register({ setPage }) {
   return (
     <form style={styles.form} onSubmit={register}>
       <h2>Daftar Akun</h2>
-
-      <input
-        placeholder="Nama"
-        onChange={(e) => setForm({ ...form, name: e.target.value })}
-      />
-
-      <input
-        placeholder="WhatsApp"
-        onChange={(e) => setForm({ ...form, whatsapp: e.target.value })}
-      />
-
-      <input
-        placeholder="Email"
-        onChange={(e) => setForm({ ...form, email: e.target.value })}
-      />
-
-      <input
-        placeholder="Password"
-        type="password"
-        onChange={(e) => setForm({ ...form, password: e.target.value })}
-      />
+      <input placeholder="Nama" onChange={(e) => setForm({ ...form, name: e.target.value })} />
+      <input placeholder="WhatsApp" onChange={(e) => setForm({ ...form, whatsapp: e.target.value })} />
+      <input placeholder="Email" onChange={(e) => setForm({ ...form, email: e.target.value })} />
+      <input placeholder="Password" type="password" onChange={(e) => setForm({ ...form, password: e.target.value })} />
 
       <select onChange={(e) => setForm({ ...form, role: e.target.value })}>
         <option value="buyer">Pembeli</option>
@@ -347,9 +398,9 @@ function Register({ setPage }) {
 }
 
 function SellerDashboard({ user, profile, products, orders, createNotif }) {
+  const [tab, setTab] = useState("produk");
   const myProducts = products.filter((p) => p.sellerId === user.uid);
   const myOrders = orders.filter((o) => o.sellerId === user.uid);
-  const [tab, setTab] = useState("produk");
 
   return (
     <main style={styles.container}>
@@ -360,12 +411,7 @@ function SellerDashboard({ user, profile, products, orders, createNotif }) {
       <button onClick={() => setTab("withdraw")}>Penarikan</button>
 
       {tab === "produk" && (
-        <AddProduct
-          user={user}
-          profile={profile}
-          products={myProducts}
-          createNotif={createNotif}
-        />
+        <AddProduct user={user} profile={profile} products={myProducts} createNotif={createNotif} />
       )}
 
       {tab === "order" && (
@@ -386,6 +432,11 @@ function AddProduct({ user, profile, products, createNotif }) {
     price: "",
     stock: "",
     description: "",
+    weightGram: "",
+    sellerAddress: "",
+    sellerCityId: "",
+    sellerLatitude: "",
+    sellerLongitude: "",
   });
 
   const [file, setFile] = useState(null);
@@ -393,7 +444,6 @@ function AddProduct({ user, profile, products, createNotif }) {
 
   function handleFile(e) {
     const selected = e.target.files[0];
-
     if (!selected) return;
 
     if (selected.size > 1024 * 1024) {
@@ -409,7 +459,7 @@ function AddProduct({ user, profile, products, createNotif }) {
     e.preventDefault();
 
     if (!file) {
-      alert("Pilih gambar produk dulu");
+      alert("Pilih gambar dulu");
       return;
     }
 
@@ -418,9 +468,16 @@ function AddProduct({ user, profile, products, createNotif }) {
     const ref = await addDoc(collection(db, "products"), {
       sellerId: user.uid,
       sellerName: profile.name,
-      ...form,
+      productName: form.productName,
+      category: form.category,
       price: Number(form.price),
       stock: Number(form.stock),
+      description: form.description,
+      weightGram: Number(form.weightGram || 1000),
+      sellerAddress: form.sellerAddress,
+      sellerCityId: form.sellerCityId,
+      sellerLatitude: Number(form.sellerLatitude || 0),
+      sellerLongitude: Number(form.sellerLongitude || 0),
       imageUrl,
       status: "pending",
       commissionType: "percent",
@@ -439,43 +496,26 @@ function AddProduct({ user, profile, products, createNotif }) {
       productId: ref.id,
     });
 
-    alert("Produk berhasil diupload, menunggu approval admin");
+    alert("Produk berhasil diupload. Menunggu approval admin.");
   }
 
   return (
     <div>
       <form style={styles.form} onSubmit={submit}>
         <h3>Tambah Produk</h3>
-
-        <input
-          placeholder="Nama produk"
-          onChange={(e) => setForm({ ...form, productName: e.target.value })}
-        />
-
-        <input
-          placeholder="Kategori"
-          onChange={(e) => setForm({ ...form, category: e.target.value })}
-        />
-
-        <input
-          placeholder="Harga"
-          type="number"
-          onChange={(e) => setForm({ ...form, price: e.target.value })}
-        />
-
-        <input
-          placeholder="Stok"
-          type="number"
-          onChange={(e) => setForm({ ...form, stock: e.target.value })}
-        />
-
-        <textarea
-          placeholder="Deskripsi"
-          onChange={(e) => setForm({ ...form, description: e.target.value })}
-        />
+        <input placeholder="Nama produk" onChange={(e) => setForm({ ...form, productName: e.target.value })} />
+        <input placeholder="Kategori" onChange={(e) => setForm({ ...form, category: e.target.value })} />
+        <input placeholder="Harga" type="number" onChange={(e) => setForm({ ...form, price: e.target.value })} />
+        <input placeholder="Stok" type="number" onChange={(e) => setForm({ ...form, stock: e.target.value })} />
+        <input placeholder="Berat gram, contoh 1000" type="number" onChange={(e) => setForm({ ...form, weightGram: e.target.value })} />
+        <input placeholder="Alamat seller" onChange={(e) => setForm({ ...form, sellerAddress: e.target.value })} />
+        <input placeholder="ID kota RajaOngkir seller" onChange={(e) => setForm({ ...form, sellerCityId: e.target.value })} />
+        <input placeholder="Latitude seller" onChange={(e) => setForm({ ...form, sellerLatitude: e.target.value })} />
+        <input placeholder="Longitude seller" onChange={(e) => setForm({ ...form, sellerLongitude: e.target.value })} />
+        <textarea placeholder="Deskripsi" onChange={(e) => setForm({ ...form, description: e.target.value })} />
 
         <input type="file" accept="image/jpeg,image/png,image/webp" onChange={handleFile} />
-        <small>Format JPG, PNG, WEBP. Maksimal 1MB.</small>
+        <small>Foto maksimal 1MB</small>
 
         {preview && <img src={preview} alt="Preview" style={styles.preview} />}
 
@@ -483,11 +523,8 @@ function AddProduct({ user, profile, products, createNotif }) {
       </form>
 
       <h3>Produk Saya</h3>
-
       <div style={styles.grid}>
-        {products.map((p) => (
-          <ProductCard key={p.id} product={p} />
-        ))}
+        {products.map((p) => <ProductCard key={p.id} product={p} />)}
       </div>
     </div>
   );
@@ -509,7 +546,7 @@ function SellerOrders({ orders, createNotif }) {
       orderId: o.id,
     });
 
-    alert("Status berhasil diupdate");
+    alert("Status order berhasil diubah");
   }
 
   return (
@@ -520,17 +557,18 @@ function SellerOrders({ orders, createNotif }) {
         <div style={styles.card} key={o.id}>
           <h3>{o.productName}</h3>
           <p>Buyer: {o.buyerName}</p>
-          <p>Total: {rupiah(o.totalAmount)}</p>
+          <p>Subtotal: {rupiah(o.productTotal)}</p>
+          <p>Ongkir: {rupiah(o.shippingCost)}</p>
+          <p>Total dibayar buyer: {rupiah(o.totalAmount)}</p>
+          <p>Saldo bersih seller: {rupiah(o.sellerAmount)}</p>
+          <p>Pengiriman: {o.courierName} {o.courierService}</p>
           <p>Status bayar: {o.statusPembayaran}</p>
           <p>Status pesanan: {o.statusPesanan}</p>
 
           {o.paymentProofUrl && (
-            <a href={o.paymentProofUrl} target="_blank" rel="noreferrer">
-              Lihat Bukti
-            </a>
+            <img src={o.paymentProofUrl} alt="Bukti pembayaran" style={styles.proofImg} />
           )}
 
-          <br />
           <button onClick={() => updateOrder(o, "diproses")}>Proses</button>
           <button onClick={() => updateOrder(o, "dikirim")}>Kirim</button>
           <button onClick={() => updateOrder(o, "dibatalkan")}>Batalkan</button>
@@ -562,7 +600,9 @@ function Withdraw({ user, profile, createNotif }) {
       sellerId: user.uid,
       sellerName: profile.name,
       amount,
-      ...form,
+      bankName: form.bankName,
+      accountNumber: form.accountNumber,
+      accountHolder: form.accountHolder,
       status: "pending",
       createdAt: serverTimestamp(),
       updatedAt: serverTimestamp(),
@@ -572,46 +612,24 @@ function Withdraw({ user, profile, createNotif }) {
       role: "admin",
       type: "withdraw_new",
       title: "Penarikan Baru",
-      message: `Penarikan baru dari ${profile.name} sebesar ${rupiah(
-        amount
-      )} ke ${form.bankName}`,
+      message: `Penarikan baru dari ${profile.name} sebesar ${rupiah(amount)} ke ${form.bankName}`,
       withdrawalId: ref.id,
     });
 
-    alert("Penarikan berhasil diajukan");
+    alert("Penarikan diajukan");
   }
 
   return (
     <form style={styles.form} onSubmit={submit}>
       <h3>Ajukan Penarikan</h3>
-
       <input
         placeholder="Jumlah minimal 10.000"
         value={amountText}
-        onChange={(e) =>
-          setAmountText(
-            Number(e.target.value.replace(/\D/g, "") || 0).toLocaleString(
-              "id-ID"
-            )
-          )
-        }
+        onChange={(e) => setAmountText(Number(e.target.value.replace(/\D/g, "") || 0).toLocaleString("id-ID"))}
       />
-
-      <input
-        placeholder="Bank"
-        onChange={(e) => setForm({ ...form, bankName: e.target.value })}
-      />
-
-      <input
-        placeholder="Nomor rekening"
-        onChange={(e) => setForm({ ...form, accountNumber: e.target.value })}
-      />
-
-      <input
-        placeholder="Atas nama"
-        onChange={(e) => setForm({ ...form, accountHolder: e.target.value })}
-      />
-
+      <input placeholder="Bank" onChange={(e) => setForm({ ...form, bankName: e.target.value })} />
+      <input placeholder="Nomor rekening" onChange={(e) => setForm({ ...form, accountNumber: e.target.value })} />
+      <input placeholder="Atas nama" onChange={(e) => setForm({ ...form, accountHolder: e.target.value })} />
       <button style={styles.primary}>Ajukan</button>
     </form>
   );
@@ -625,13 +643,7 @@ function BuyerDashboard({ user, orders, products, paymentSetting, createNotif })
     const exists = cart.find((item) => item.id === product.id);
 
     if (exists) {
-      setCart(
-        cart.map((item) =>
-          item.id === product.id
-            ? { ...item, quantity: item.quantity + 1 }
-            : item
-        )
-      );
+      setCart(cart.map((item) => item.id === product.id ? { ...item, quantity: item.quantity + 1 } : item));
     } else {
       setCart([...cart, { ...product, quantity: 1 }]);
     }
@@ -645,18 +657,8 @@ function BuyerDashboard({ user, orders, products, paymentSetting, createNotif })
 
   function updateQty(productId, quantity) {
     if (quantity < 1) return;
-
-    setCart(
-      cart.map((item) =>
-        item.id === productId ? { ...item, quantity } : item
-      )
-    );
+    setCart(cart.map((item) => item.id === productId ? { ...item, quantity } : item));
   }
-
-  const totalCart = cart.reduce(
-    (sum, item) => sum + Number(item.price) * Number(item.quantity),
-    0
-  );
 
   async function checkoutCart() {
     if (cart.length === 0) {
@@ -667,20 +669,78 @@ function BuyerDashboard({ user, orders, products, paymentSetting, createNotif })
     const buyerName = prompt("Nama pembeli:");
     const buyerWhatsapp = prompt("Nomor WhatsApp:");
     const buyerAddress = prompt("Alamat lengkap:");
+    const shippingType = prompt("Pilih pengiriman: pickup / same_day / jne / pos / tiki / sicepat / jnt");
 
-    if (!buyerName || !buyerWhatsapp || !buyerAddress) {
-      alert("Data pembeli wajib lengkap");
+    if (!buyerName || !buyerWhatsapp || !buyerAddress || !shippingType) {
+      alert("Data wajib lengkap");
       return;
     }
 
+    let buyerLatitude = "";
+    let buyerLongitude = "";
+    let destinationCityId = "";
+
+    if (shippingType === "same_day") {
+      buyerLatitude = prompt("Latitude buyer:");
+      buyerLongitude = prompt("Longitude buyer:");
+
+      if (!buyerLatitude || !buyerLongitude) {
+        alert("Latitude dan longitude wajib untuk Same Day");
+        return;
+      }
+    }
+
+    if (shippingType !== "same_day" && shippingType !== "pickup") {
+      destinationCityId = prompt("ID kota RajaOngkir tujuan buyer:");
+
+      if (!destinationCityId) {
+        alert("ID kota tujuan wajib diisi");
+        return;
+      }
+    }
+
+    let totalSemuaOrder = 0;
+
     for (const item of cart) {
-      const totalAmount = Number(item.price) * Number(item.quantity);
-      const adminFee = calcCommission(
-        totalAmount,
-        item.commissionType,
-        item.commissionValue
-      );
-      const sellerAmount = totalAmount - adminFee;
+      const productTotal = Number(item.price) * Number(item.quantity);
+      const adminFee = calcCommission(productTotal, item.commissionType, item.commissionValue);
+
+      let shippingCost = 0;
+      let distanceKm = 0;
+      let courierName = "";
+      let courierService = "";
+
+      if (shippingType === "pickup") {
+        shippingCost = 0;
+        courierName = "Ambil di Tempat";
+        courierService = "Gratis";
+      }
+
+      if (shippingType === "same_day") {
+        distanceKm = calculateDistanceKm(
+          item.sellerLatitude,
+          item.sellerLongitude,
+          buyerLatitude,
+          buyerLongitude
+        );
+
+        shippingCost = calculateSameDayShipping(distanceKm);
+        courierName = "Same Day Lokal";
+        courierService = `${distanceKm.toFixed(1)} km`;
+      }
+
+      if (["jne", "pos", "tiki", "sicepat", "jnt"].includes(shippingType)) {
+        const weightTotal = Number(item.weightGram || 1000) * Number(item.quantity);
+        const costs = await getOngkirAPI(item.sellerCityId, destinationCityId, weightTotal, shippingType);
+        const selected = costs[0];
+
+        shippingCost = selected.cost[0].value;
+        courierName = shippingType.toUpperCase();
+        courierService = `${selected.service} - ${selected.cost[0].etd} hari`;
+      }
+
+      const totalAmount = productTotal + shippingCost;
+      const sellerAmount = productTotal - adminFee + shippingCost;
 
       const ref = await addDoc(collection(db, "orders"), {
         buyerId: user.uid,
@@ -691,7 +751,16 @@ function BuyerDashboard({ user, orders, products, paymentSetting, createNotif })
         buyerName,
         buyerWhatsapp,
         buyerAddress,
+        buyerLatitude: buyerLatitude ? Number(buyerLatitude) : null,
+        buyerLongitude: buyerLongitude ? Number(buyerLongitude) : null,
+        destinationCityId: destinationCityId || null,
         quantity: item.quantity,
+        productTotal,
+        shippingType,
+        shippingCost,
+        distanceKm,
+        courierName,
+        courierService,
         totalAmount,
         adminFee,
         sellerAmount,
@@ -701,6 +770,8 @@ function BuyerDashboard({ user, orders, products, paymentSetting, createNotif })
         createdAt: serverTimestamp(),
         updatedAt: serverTimestamp(),
       });
+
+      totalSemuaOrder += totalAmount;
 
       await createNotif({
         role: "admin",
@@ -715,100 +786,67 @@ function BuyerDashboard({ user, orders, products, paymentSetting, createNotif })
         userId: item.sellerId,
         type: "order_new",
         title: "Pesanan Baru",
-        message: `Ada pesanan baru menunggu pembayaran: ${item.productName}`,
+        message: `Ada pesanan baru ${item.productName}, total ${rupiah(totalAmount)}`,
         orderId: ref.id,
       });
     }
 
-    const phone = cleanWa(paymentSetting?.adminWhatsappNumber);
-
-    if (phone) {
-      const productList = cart
-        .map(
-          (item) =>
-            `- ${item.productName} x${item.quantity} = ${rupiah(
-              Number(item.price) * Number(item.quantity)
-            )}`
-        )
-        .join("\n");
-
-      const msg = `Halo Admin, saya ingin konfirmasi pembayaran.\n\nDetail Pesanan:\nNama Pembeli: ${buyerName}\nProduk:\n${productList}\nTotal: ${rupiah(totalCart)}\n\nSaya sudah melakukan checkout, mohon dicek.`;
-
-      window.open(`https://wa.me/${phone}?text=${encodeURIComponent(msg)}`, "_blank");
-    }
-
+    alert(`Checkout berhasil. Total semua: ${rupiah(totalSemuaOrder)}. Silakan upload bukti pembayaran.`);
     setCart([]);
-    alert("Checkout keranjang berhasil dibuat");
   }
 
   return (
     <main style={styles.container}>
       <h2>Dashboard Customer</h2>
 
+      <div style={styles.card}>
+        <h3>Rekening Pembayaran</h3>
+        <p>Bank: {paymentSetting?.bankName || "-"}</p>
+        <p>No Rekening: {paymentSetting?.accountNumber || "-"}</p>
+        <p>Atas Nama: {paymentSetting?.accountHolder || "-"}</p>
+        <p>Kontak pengaduan: {complaintEmail}</p>
+      </div>
+
       <h3>Produk Tersedia</h3>
-
       <div style={styles.grid}>
-        {products
-          .filter((p) => p.status === "active")
-          .map((p) => (
-            <div style={styles.card} key={p.id}>
-              <img src={p.imageUrl} style={styles.img} alt={p.productName} />
-              <h3>{p.productName}</h3>
-              <p>{p.category}</p>
-              <b>{rupiah(p.price)}</b>
-              <p>
-                ⭐ {p.averageRating || 0} | {p.totalReviews || 0} ulasan
-              </p>
-
-              <button style={styles.cartBtn} onClick={() => addToCart(p)}>
-                🛒 Tambah ke Keranjang
-              </button>
-            </div>
-          ))}
+        {products.filter((p) => p.status === "active").map((p) => (
+          <div style={styles.card} key={p.id}>
+            <img src={p.imageUrl} style={styles.img} alt={p.productName} />
+            <h3>{p.productName}</h3>
+            <p>{p.category}</p>
+            <b>{rupiah(p.price)}</b>
+            <p>⭐ {p.averageRating || 0} | {p.totalReviews || 0} ulasan</p>
+            <button style={styles.cartBtn} onClick={() => addToCart(p)}>🛒 Tambah ke Keranjang</button>
+          </div>
+        ))}
       </div>
 
       <h3>🛒 Keranjang Saya</h3>
-
       {cart.length === 0 ? (
-        <div style={styles.card}>
-          <p>Keranjang masih kosong</p>
-        </div>
+        <div style={styles.card}>Keranjang kosong</div>
       ) : (
         <div style={styles.card}>
           {cart.map((item) => (
             <div key={item.id} style={styles.cartItem}>
               <img src={item.imageUrl} style={styles.cartImg} alt={item.productName} />
-
               <div style={{ flex: 1 }}>
                 <h4>{item.productName}</h4>
                 <p>{rupiah(item.price)}</p>
-
                 <div style={styles.qtyBox}>
-                  <button onClick={() => updateQty(item.id, item.quantity - 1)}>
-                    -
-                  </button>
+                  <button onClick={() => updateQty(item.id, item.quantity - 1)}>-</button>
                   <span>{item.quantity}</span>
-                  <button onClick={() => updateQty(item.id, item.quantity + 1)}>
-                    +
-                  </button>
+                  <button onClick={() => updateQty(item.id, item.quantity + 1)}>+</button>
                 </div>
               </div>
-
               <button onClick={() => removeFromCart(item.id)}>Hapus</button>
             </div>
           ))}
 
-          <hr />
-          <h3>Total: {rupiah(totalCart)}</h3>
-
-          <button style={styles.primary} onClick={checkoutCart}>
-            Checkout Keranjang
-          </button>
+          <button style={styles.primary} onClick={checkoutCart}>Checkout Keranjang</button>
         </div>
       )}
 
       <h3>Riwayat Pesanan Saya</h3>
-
       {myOrders.map((o) => (
         <BuyerOrder key={o.id} order={o} createNotif={createNotif} />
       ))}
@@ -823,7 +861,6 @@ function BuyerOrder({ order, createNotif }) {
 
   function handleProofFile(e) {
     const selected = e.target.files[0];
-
     if (!selected) return;
 
     if (selected.size > 1024 * 1024) {
@@ -861,7 +898,7 @@ function BuyerOrder({ order, createNotif }) {
       userId: order.sellerId,
       type: "payment_proof",
       title: "Buyer Upload Bukti",
-      message: `Buyer sudah mengirim bukti pembayaran untuk ${order.productName}`,
+      message: `Buyer upload bukti untuk ${order.productName}`,
       orderId: order.id,
     });
 
@@ -908,24 +945,22 @@ function BuyerOrder({ order, createNotif }) {
     <div style={styles.card}>
       <h3>{order.productName}</h3>
       <p>Total: {rupiah(order.totalAmount)}</p>
-      <p>Bayar: {order.statusPembayaran}</p>
-      <p>Pesanan: {order.statusPesanan}</p>
+      <p>Ongkir: {rupiah(order.shippingCost)}</p>
+      <p>Pengiriman: {order.courierName} {order.courierService}</p>
+      <p>Status bayar: {order.statusPembayaran}</p>
+      <p>Status pesanan: {order.statusPesanan}</p>
 
       <input type="file" accept="image/jpeg,image/png,image/webp" onChange={handleProofFile} />
       <small>Bukti pembayaran maksimal 1MB</small>
-      <br />
       <button onClick={uploadProof}>Kirim Bukti Pembayaran</button>
 
       {order.statusPesanan === "dikirim" && (
-        <button style={styles.primary} onClick={received}>
-          Pesanan Diterima
-        </button>
+        <button style={styles.primary} onClick={received}>Pesanan Diterima</button>
       )}
 
       {order.statusPesanan === "selesai" && (
         <div>
           <h4>Ulasan</h4>
-
           <select onChange={(e) => setRating(e.target.value)}>
             <option value="5">5 Bintang</option>
             <option value="4">4 Bintang</option>
@@ -933,12 +968,7 @@ function BuyerOrder({ order, createNotif }) {
             <option value="2">2 Bintang</option>
             <option value="1">1 Bintang</option>
           </select>
-
-          <textarea
-            placeholder="Komentar"
-            onChange={(e) => setComment(e.target.value)}
-          />
-
+          <textarea placeholder="Komentar" onChange={(e) => setComment(e.target.value)} />
           <button onClick={sendReview}>Kirim Ulasan</button>
         </div>
       )}
@@ -947,35 +977,51 @@ function BuyerOrder({ order, createNotif }) {
 }
 
 function AdminDashboard({
+  profile,
   products,
   orders,
   withdrawals,
   paymentSetting,
+  manualBalance,
+  wallets,
   createNotif,
 }) {
-  const [tab, setTab] = useState("produk");
+  const [tab, setTab] = useState("order");
+
+  const autoBalance = wallets.reduce((sum, w) => sum + Number(w.saldoTersedia || 0), 0);
+  const displayedBalance = manualBalance?.isManualBalanceActive
+    ? Number(manualBalance.totalSellerBalanceManual || 0)
+    : autoBalance;
 
   return (
     <main style={styles.container}>
-      <h2>Dashboard Admin</h2>
+      <h2>{profile.role === "sub_admin" ? "Dashboard Admin Order" : "Dashboard Admin Utama"}</h2>
 
       <div style={styles.stats}>
         <div style={styles.stat}>Produk: {products.length}</div>
         <div style={styles.stat}>Order: {orders.length}</div>
         <div style={styles.stat}>Withdraw: {withdrawals.length}</div>
+        <div style={styles.stat}>Saldo belum ditarik: {rupiah(displayedBalance)}</div>
       </div>
 
-      <button onClick={() => setTab("produk")}>Produk</button>
-      <button onClick={() => setTab("order")}>Order</button>
-      <button onClick={() => setTab("withdraw")}>Penarikan</button>
-      <button onClick={() => setTab("payment")}>Pembayaran</button>
+      <button onClick={() => setTab("order")}>Order Masuk</button>
 
-      {tab === "produk" && <AdminProducts products={products} />}
-      {tab === "order" && (
-        <AdminOrders orders={orders} createNotif={createNotif} />
+      {profile.role === "admin" && (
+        <>
+          <button onClick={() => setTab("produk")}>Produk</button>
+          <button onClick={() => setTab("withdraw")}>Penarikan</button>
+          <button onClick={() => setTab("payment")}>Rekening</button>
+          <button onClick={() => setTab("balance")}>Edit Saldo Manual</button>
+          <button onClick={() => setTab("admins")}>Tambah Admin</button>
+        </>
       )}
-      {tab === "withdraw" && <AdminWithdraw withdrawals={withdrawals} />}
-      {tab === "payment" && <PaymentSetting paymentSetting={paymentSetting} />}
+
+      {tab === "order" && <AdminOrders orders={orders} createNotif={createNotif} />}
+      {tab === "produk" && profile.role === "admin" && <AdminProducts products={products} />}
+      {tab === "withdraw" && profile.role === "admin" && <AdminWithdraw withdrawals={withdrawals} />}
+      {tab === "payment" && profile.role === "admin" && <PaymentSetting paymentSetting={paymentSetting} />}
+      {tab === "balance" && profile.role === "admin" && <ManualBalance />}
+      {tab === "admins" && profile.role === "admin" && <CreateSubAdmin />}
     </main>
   );
 }
@@ -983,6 +1029,10 @@ function AdminDashboard({
 function AdminProducts({ products }) {
   async function approve(id) {
     await updateDoc(doc(db, "products", id), { status: "active" });
+  }
+
+  async function reject(id) {
+    await updateDoc(doc(db, "products", id), { status: "rejected" });
   }
 
   async function updateCommission(id, type, value) {
@@ -995,40 +1045,16 @@ function AdminProducts({ products }) {
   return (
     <div>
       <h3>Kelola Produk</h3>
-
       {products.map((p) => (
         <div style={styles.card} key={p.id}>
+          <img src={p.imageUrl} style={styles.img} alt={p.productName} />
           <h3>{p.productName}</h3>
           <p>Status: {p.status}</p>
-          <p>
-            Komisi: {p.commissionType} {p.commissionValue}
-          </p>
-
+          <p>Komisi: {p.commissionType} {p.commissionValue}</p>
           <button onClick={() => approve(p.id)}>Approve</button>
-
-          <button
-            onClick={() =>
-              updateCommission(
-                p.id,
-                "percent",
-                prompt("Komisi persen:", p.commissionValue || 10)
-              )
-            }
-          >
-            Set Persen
-          </button>
-
-          <button
-            onClick={() =>
-              updateCommission(
-                p.id,
-                "fixed",
-                prompt("Komisi nominal:", p.commissionValue || 1000)
-              )
-            }
-          >
-            Set Nominal
-          </button>
+          <button onClick={() => reject(p.id)}>Tolak</button>
+          <button onClick={() => updateCommission(p.id, "percent", prompt("Komisi persen:", p.commissionValue || 10))}>Set Persen</button>
+          <button onClick={() => updateCommission(p.id, "fixed", prompt("Komisi nominal:", p.commissionValue || 1000))}>Set Nominal</button>
         </div>
       ))}
     </div>
@@ -1041,6 +1067,7 @@ function AdminOrders({ orders, createNotif }) {
       statusPembayaran: "sudah_dibayar",
       statusPesanan: "pesanan_masuk",
       showToSeller: true,
+      updatedAt: serverTimestamp(),
     });
 
     await setDoc(
@@ -1066,39 +1093,63 @@ function AdminOrders({ orders, createNotif }) {
       userId: o.sellerId,
       type: "payment_approved",
       title: "Pesanan Sudah Dibayar",
-      message: `Pesanan ${o.productName} sudah dibayar. Saldo bersih ${rupiah(
-        o.sellerAmount
-      )}`,
+      message: `Pesanan ${o.productName} sudah dibayar. Saldo bersih ${rupiah(o.sellerAmount)}`,
       orderId: o.id,
     });
 
     alert("Pembayaran disetujui");
   }
 
+  async function reject(o) {
+    await updateDoc(doc(db, "orders", o.id), {
+      statusPembayaran: "ditolak",
+      statusPesanan: "dibatalkan",
+      updatedAt: serverTimestamp(),
+    });
+
+    await createNotif({
+      role: "buyer",
+      userId: o.buyerId,
+      type: "payment_rejected",
+      title: "Pembayaran Ditolak",
+      message: `Pembayaran untuk ${o.productName} ditolak admin`,
+      orderId: o.id,
+    });
+
+    await createNotif({
+      role: "seller",
+      userId: o.sellerId,
+      type: "payment_rejected",
+      title: "Pembayaran Ditolak",
+      message: `Pembayaran ${o.productName} ditolak admin`,
+      orderId: o.id,
+    });
+
+    alert("Pembayaran ditolak");
+  }
+
   return (
     <div>
-      <h3>Kelola Order</h3>
+      <h3>Order Masuk</h3>
 
       {orders.map((o) => (
         <div style={styles.card} key={o.id}>
           <h3>{o.productName}</h3>
           <p>Buyer: {o.buyerName}</p>
-          <p>Total: {rupiah(o.totalAmount)}</p>
-          <p>Komisi: {rupiah(o.adminFee)}</p>
-          <p>Seller bersih: {rupiah(o.sellerAmount)}</p>
-          <p>Status: {o.statusPembayaran}</p>
+          <p>Subtotal: {rupiah(o.productTotal)}</p>
+          <p>Ongkir: {rupiah(o.shippingCost)}</p>
+          <p>Total bayar: {rupiah(o.totalAmount)}</p>
+          <p>Komisi admin: {rupiah(o.adminFee)}</p>
+          <p>Saldo seller: {rupiah(o.sellerAmount)}</p>
+          <p>Pengiriman: {o.courierName} {o.courierService}</p>
+          <p>Status pembayaran: {o.statusPembayaran}</p>
 
           {o.paymentProofUrl && (
-            <a href={o.paymentProofUrl} target="_blank" rel="noreferrer">
-              Lihat Bukti Transfer
-            </a>
+            <img src={o.paymentProofUrl} alt="Bukti pembayaran" style={styles.proofImg} />
           )}
 
-          <br />
-
-          <button style={styles.primary} onClick={() => approve(o)}>
-            Approve Pembayaran
-          </button>
+          <button style={styles.primary} onClick={() => approve(o)}>Approve Pembayaran</button>
+          <button onClick={() => reject(o)}>Tolak Pembayaran</button>
         </div>
       ))}
     </div>
@@ -1139,12 +1190,9 @@ Atas Nama: ${w.accountHolder}`;
         <div style={styles.card} key={w.id}>
           <h3>{w.sellerName}</h3>
           <p>{rupiah(w.amount)}</p>
-          <p>
-            {w.bankName} - {w.accountNumber}
-          </p>
+          <p>{w.bankName} - {w.accountNumber}</p>
           <p>Atas Nama: {w.accountHolder}</p>
           <p>Status: {w.status}</p>
-
           <button onClick={() => copyRek(w)}>Salin Rekening</button>
           <button onClick={() => copyDetail(w)}>Salin Detail</button>
           <button onClick={() => updateStatus(w, "approved")}>Approve</button>
@@ -1167,48 +1215,90 @@ function PaymentSetting({ paymentSetting }) {
       updatedAt: serverTimestamp(),
     });
 
-    alert("Pengaturan pembayaran disimpan");
+    alert("Rekening pembayaran disimpan");
   }
 
   return (
     <form style={styles.form} onSubmit={save}>
-      <h3>Pengaturan Pembayaran Admin</h3>
-
-      <input
-        placeholder="Bank"
-        value={form.bankName || ""}
-        onChange={(e) => setForm({ ...form, bankName: e.target.value })}
-      />
-
-      <input
-        placeholder="Nomor rekening"
-        value={form.accountNumber || ""}
-        onChange={(e) => setForm({ ...form, accountNumber: e.target.value })}
-      />
-
-      <input
-        placeholder="Pemilik rekening"
-        value={form.accountHolder || ""}
-        onChange={(e) => setForm({ ...form, accountHolder: e.target.value })}
-      />
-
-      <input
-        placeholder="Nama Admin WA"
-        value={form.adminWhatsappName || ""}
-        onChange={(e) =>
-          setForm({ ...form, adminWhatsappName: e.target.value })
-        }
-      />
-
-      <input
-        placeholder="Nomor WA Admin"
-        value={form.adminWhatsappNumber || ""}
-        onChange={(e) =>
-          setForm({ ...form, adminWhatsappNumber: e.target.value })
-        }
-      />
-
+      <h3>Pengaturan Rekening Pembayaran</h3>
+      <input placeholder="Bank" value={form.bankName || ""} onChange={(e) => setForm({ ...form, bankName: e.target.value })} />
+      <input placeholder="Nomor rekening" value={form.accountNumber || ""} onChange={(e) => setForm({ ...form, accountNumber: e.target.value })} />
+      <input placeholder="Atas nama" value={form.accountHolder || ""} onChange={(e) => setForm({ ...form, accountHolder: e.target.value })} />
       <button style={styles.primary}>Simpan</button>
+    </form>
+  );
+}
+
+function ManualBalance() {
+  const [amount, setAmount] = useState("");
+  const [active, setActive] = useState(false);
+
+  async function save(e) {
+    e.preventDefault();
+
+    await setDoc(doc(db, "admin_settings", "manualBalance"), {
+      totalSellerBalanceManual: Number(amount.replace(/\D/g, "")),
+      isManualBalanceActive: active,
+      updatedAt: serverTimestamp(),
+    });
+
+    alert("Saldo manual disimpan");
+  }
+
+  return (
+    <form style={styles.form} onSubmit={save}>
+      <h3>Edit Manual Total Saldo Seller</h3>
+      <input
+        placeholder="Contoh 100.000"
+        value={amount}
+        onChange={(e) => setAmount(Number(e.target.value.replace(/\D/g, "") || 0).toLocaleString("id-ID"))}
+      />
+      <label>
+        <input type="checkbox" checked={active} onChange={(e) => setActive(e.target.checked)} />
+        Aktifkan saldo manual
+      </label>
+      <button style={styles.primary}>Simpan</button>
+    </form>
+  );
+}
+
+function CreateSubAdmin() {
+  const [form, setForm] = useState({
+    name: "",
+    email: "",
+    password: "",
+  });
+
+  async function submit(e) {
+    e.preventDefault();
+
+    const res = await createUserWithEmailAndPassword(auth, form.email, form.password);
+
+    await setDoc(doc(db, "users", res.user.uid), {
+      uid: res.user.uid,
+      name: form.name,
+      email: form.email,
+      role: "sub_admin",
+      status: "active",
+      permissions: {
+        canViewOrders: true,
+        canApprovePayments: true,
+        canRejectPayments: true,
+        canViewPaymentProof: true,
+      },
+      createdAt: serverTimestamp(),
+    });
+
+    alert("Admin tambahan berhasil dibuat");
+  }
+
+  return (
+    <form style={styles.form} onSubmit={submit}>
+      <h3>Tambah Admin Order</h3>
+      <input placeholder="Nama admin" onChange={(e) => setForm({ ...form, name: e.target.value })} />
+      <input placeholder="Email login" onChange={(e) => setForm({ ...form, email: e.target.value })} />
+      <input placeholder="Password" type="password" onChange={(e) => setForm({ ...form, password: e.target.value })} />
+      <button style={styles.primary}>Buat Admin</button>
     </form>
   );
 }
@@ -1218,7 +1308,7 @@ function NotificationPage({ notifications }) {
     await updateDoc(doc(db, "notifications", id), { isRead: true });
   }
 
-  async function del(id) {
+  async function deleteNotif(id) {
     await deleteDoc(doc(db, "notifications", id));
   }
 
@@ -1228,10 +1318,16 @@ function NotificationPage({ notifications }) {
     }
   }
 
+  async function markAllRead() {
+    for (const n of notifications) {
+      await updateDoc(doc(db, "notifications", n.id), { isRead: true });
+    }
+  }
+
   return (
     <main style={styles.container}>
       <h2>Notifikasi</h2>
-
+      <button onClick={markAllRead}>Tandai Semua Dibaca</button>
       <button onClick={deleteAll}>Hapus Semua</button>
 
       {notifications.map((n) => (
@@ -1239,9 +1335,8 @@ function NotificationPage({ notifications }) {
           <h3>{n.title}</h3>
           <p>{n.message}</p>
           <p>{n.isRead ? "Sudah dibaca" : "Belum dibaca"}</p>
-
           <button onClick={() => markRead(n.id)}>Tandai Dibaca</button>
-          <button onClick={() => del(n.id)}>Hapus</button>
+          <button onClick={() => deleteNotif(n.id)}>Hapus</button>
         </div>
       ))}
     </main>
@@ -1254,7 +1349,6 @@ const styles = {
     background: "#f3f4f6",
     minHeight: "100vh",
   },
-
   nav: {
     background: "#047857",
     color: "white",
@@ -1264,23 +1358,19 @@ const styles = {
     alignItems: "center",
     flexWrap: "wrap",
   },
-
   logo: {
     fontSize: 22,
   },
-
   navLinks: {
     display: "flex",
     gap: 8,
     flexWrap: "wrap",
   },
-
   container: {
     padding: 24,
     maxWidth: 1200,
     margin: "auto",
   },
-
   hero: {
     background: "linear-gradient(135deg,#059669,#f97316)",
     color: "white",
@@ -1288,13 +1378,11 @@ const styles = {
     borderRadius: 24,
     marginBottom: 24,
   },
-
   grid: {
     display: "grid",
     gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))",
     gap: 18,
   },
-
   card: {
     background: "white",
     padding: 18,
@@ -1302,22 +1390,26 @@ const styles = {
     boxShadow: "0 8px 25px rgba(0,0,0,0.08)",
     marginBottom: 14,
   },
-
   img: {
     width: "100%",
     height: 180,
     objectFit: "cover",
     borderRadius: 14,
   },
-
+  proofImg: {
+    width: "100%",
+    maxWidth: 360,
+    height: 240,
+    objectFit: "cover",
+    borderRadius: 14,
+    margin: "10px 0",
+  },
   preview: {
     width: "100%",
     height: 220,
     objectFit: "cover",
     borderRadius: 14,
-    marginTop: 10,
   },
-
   form: {
     background: "white",
     padding: 24,
@@ -1325,11 +1417,10 @@ const styles = {
     display: "flex",
     flexDirection: "column",
     gap: 12,
-    maxWidth: 500,
+    maxWidth: 520,
     margin: "24px auto",
     boxShadow: "0 8px 25px rgba(0,0,0,0.08)",
   },
-
   primary: {
     background: "#059669",
     color: "white",
@@ -1339,7 +1430,6 @@ const styles = {
     cursor: "pointer",
     fontWeight: "bold",
   },
-
   cartBtn: {
     background: "#f97316",
     color: "white",
@@ -1351,7 +1441,6 @@ const styles = {
     width: "100%",
     marginTop: 10,
   },
-
   cartItem: {
     display: "flex",
     gap: 12,
@@ -1359,27 +1448,23 @@ const styles = {
     borderBottom: "1px solid #e5e7eb",
     padding: "12px 0",
   },
-
   cartImg: {
     width: 80,
     height: 80,
     objectFit: "cover",
     borderRadius: 12,
   },
-
   qtyBox: {
     display: "flex",
     gap: 10,
     alignItems: "center",
   },
-
   stats: {
     display: "flex",
     gap: 12,
     flexWrap: "wrap",
     marginBottom: 20,
   },
-
   stat: {
     background: "white",
     padding: 18,
@@ -1387,9 +1472,13 @@ const styles = {
     minWidth: 160,
     boxShadow: "0 8px 25px rgba(0,0,0,0.08)",
   },
-
   center: {
     padding: 50,
     textAlign: "center",
+  },
+  footer: {
+    padding: 20,
+    textAlign: "center",
+    color: "#555",
   },
 };
