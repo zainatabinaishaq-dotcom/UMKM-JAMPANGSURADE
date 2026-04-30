@@ -36,6 +36,13 @@ Multi-role marketplace dengan UI modern Shopee-style:
 - Sidebar dashboard untuk Buyer, Seller, Admin
 - Tabel produk/order untuk admin
 - Status badge berwarna (pending, aktif, selesai, dll)
+- Sistem notifikasi terisolasi per peran (buyer/seller/admin):
+  - Admin: menerima SEMUA notifikasi dari seluruh aktivitas platform
+  - Seller: hanya menerima notif dari pesanan produk miliknya sendiri
+  - Buyer: hanya menerima notif untuk pesanan miliknya sendiri
+  - Notif pendaftaran user/seller hanya masuk ke admin (tanpa userId)
+- NotificationPage: ikon per tipe, warna indikator, waktu relatif, desain mobile-friendly
+- Mobile responsive: bottom navigation, 2-row navbar, cart bottom-sheet, safe area inset
 
 ## Project Structure
 

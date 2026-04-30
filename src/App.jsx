@@ -699,7 +699,9 @@ function RegisterPage({ setPage, createNotif }) {
         await setDoc(doc(db, "seller_wallets", res.user.uid), {
           sellerId: res.user.uid, sellerName: form.name, saldoTersedia: 0, saldoTertahan: 0, totalPenjualan: 0, totalDitarik: 0,
         });
-        await createNotif({ role: "admin", type: "seller_register", title: "Seller Baru", message: `${form.name} mendaftar sebagai seller`, userId: res.user.uid });
+        await createNotif({ role: "admin", type: "seller_register", title: "Pendaftaran Seller Baru", message: `${form.name} mendaftar sebagai seller baru. Menunggu persetujuan.` });
+      } else {
+        await createNotif({ role: "admin", type: "user_register", title: "Pengguna Baru Mendaftar", message: `${form.name} baru saja membuat akun sebagai pembeli.` });
       }
       setPage("home");
     } catch (err) {
@@ -802,8 +804,9 @@ function CheckoutModal({ cart, user, profile, onClose, onSuccess, createNotif })
           totalAmount, adminFee, sellerAmount, statusPembayaran: "menunggu_pembayaran", statusPesanan: "menunggu_pembayaran", showToSeller: true,
           createdAt: serverTimestamp(), updatedAt: serverTimestamp(),
         });
-        await createNotif({ role: "admin", type: "order_new", title: "Order Baru", message: `${form.buyerName} membuat pesanan ${item.productName}`, orderId: ref.id });
-        await createNotif({ role: "seller", userId: item.sellerId, type: "order_new", title: "Pesanan Baru", message: `Ada pesanan baru ${item.productName}, total ${rupiah(totalAmount)}`, orderId: ref.id });
+        await createNotif({ role: "admin", type: "order_new", title: "Order Baru Masuk", message: `${form.buyerName} memesan ${item.productName} senilai ${rupiah(totalAmount)}`, orderId: ref.id });
+        await createNotif({ role: "seller", userId: item.sellerId, type: "order_new", title: "Ada Pesanan Baru! 🎉", message: `Pesanan baru: ${item.productName} (${item.quantity} pcs) senilai ${rupiah(totalAmount)}. Segera proses pesanan.`, orderId: ref.id });
+        await createNotif({ role: "buyer", userId: user.uid, type: "order_placed", title: "Pesanan Berhasil Dibuat", message: `Pesanan ${item.productName} berhasil dibuat. Silakan lakukan pembayaran sesuai instruksi.`, orderId: ref.id });
       }
       onSuccess();
     } catch (err) {
@@ -1016,15 +1019,17 @@ function BuyerOrderCard({ order, createNotif }) {
     setUploadLoading(true);
     const url = await uploadImageToCloudinary(file);
     await updateDoc(doc(db, "orders", order.id), { paymentProofUrl: url, paymentProofUploadedAt: serverTimestamp(), statusPembayaran: "menunggu_verifikasi" });
-    await createNotif({ role: "admin", type: "payment_proof", title: "Bukti Pembayaran Baru", message: `Bukti pembayaran dikirim oleh ${order.buyerName}`, orderId: order.id });
-    await createNotif({ role: "seller", userId: order.sellerId, type: "payment_proof", title: "Buyer Upload Bukti", message: `Buyer upload bukti untuk ${order.productName}`, orderId: order.id });
+    await createNotif({ role: "admin", type: "payment_proof", title: "Bukti Pembayaran Dikirim", message: `${order.buyerName} mengupload bukti pembayaran untuk pesanan ${order.productName}`, orderId: order.id });
+    await createNotif({ role: "seller", userId: order.sellerId, type: "payment_proof", title: "Buyer Upload Bukti Bayar", message: `Pembeli sudah mengupload bukti pembayaran untuk pesanan ${order.productName}. Menunggu verifikasi admin.`, orderId: order.id });
+    await createNotif({ role: "buyer", userId: order.buyerId, type: "payment_proof_sent", title: "Bukti Pembayaran Terkirim", message: `Bukti pembayaran pesanan ${order.productName} sudah diterima. Sedang dalam proses verifikasi oleh admin.`, orderId: order.id });
     setUploadLoading(false);
     alert("Bukti pembayaran berhasil dikirim");
   }
 
   async function received() {
     await updateDoc(doc(db, "orders", order.id), { statusPesanan: "selesai", updatedAt: serverTimestamp() });
-    await createNotif({ role: "seller", userId: order.sellerId, type: "order_done", title: "Pesanan Selesai", message: `${order.buyerName} telah menerima pesanan`, orderId: order.id });
+    await createNotif({ role: "seller", userId: order.sellerId, type: "order_done", title: "Pesanan Selesai ✅", message: `${order.buyerName} telah mengkonfirmasi penerimaan pesanan ${order.productName}. Transaksi selesai.`, orderId: order.id });
+    await createNotif({ role: "admin", type: "order_done", title: "Pesanan Selesai", message: `${order.buyerName} mengkonfirmasi penerimaan pesanan ${order.productName}`, orderId: order.id });
   }
 
   async function sendReview() {
@@ -1353,7 +1358,9 @@ function AddProduct({ user, profile, products, createNotif }) {
 function SellerOrders({ orders, createNotif }) {
   async function updateOrder(o, status) {
     await updateDoc(doc(db, "orders", o.id), { statusPesanan: status, updatedAt: serverTimestamp() });
-    await createNotif({ role: "buyer", userId: o.buyerId, type: "order_update", title: "Update Pesanan", message: `Pesanan ${o.productName} sekarang ${status}`, orderId: o.id });
+    const statusText = { pesanan_masuk: "telah diterima & sedang diproses", dikirim: "sedang dalam pengiriman", selesai: "telah selesai", dibatalkan: "telah dibatalkan" }[status] || status;
+    await createNotif({ role: "buyer", userId: o.buyerId, type: "order_update", title: "Status Pesanan Diperbarui", message: `Pesanan ${o.productName} Anda ${statusText}.`, orderId: o.id });
+    await createNotif({ role: "admin", type: "order_update", title: "Status Pesanan Diperbarui", message: `Seller memperbarui status pesanan ${o.productName} milik ${o.buyerName} menjadi ${statusText}`, orderId: o.id });
     alert("Status order berhasil diubah");
   }
   return (
@@ -1848,6 +1855,28 @@ function CreateSubAdmin() {
 }
 
 /* ─── NOTIFICATION PAGE ──────────────────────── */
+const NOTIF_ICONS = {
+  seller_register: "🧑‍💼", user_register: "👤", order_new: "🛒", order_placed: "✅",
+  order_update: "📦", order_done: "🎉", payment_proof: "📄", payment_proof_sent: "📤",
+  payment_approved: "✅", payment_rejected: "❌", product_new: "📦", withdraw_new: "💸",
+};
+const NOTIF_COLORS = {
+  seller_register: "#6366F1", user_register: "#8B5CF6", order_new: "#EE4D2D", order_placed: "#10B981",
+  order_update: "#F59E0B", order_done: "#10B981", payment_proof: "#3B82F6", payment_proof_sent: "#3B82F6",
+  payment_approved: "#10B981", payment_rejected: "#EF4444", product_new: "#F59E0B", withdraw_new: "#EE4D2D",
+};
+
+function timeAgo(ts) {
+  if (!ts) return "";
+  const d = ts.toDate ? ts.toDate() : new Date(ts);
+  const diff = (Date.now() - d.getTime()) / 1000;
+  if (diff < 60) return "Baru saja";
+  if (diff < 3600) return `${Math.floor(diff / 60)} menit lalu`;
+  if (diff < 86400) return `${Math.floor(diff / 3600)} jam lalu`;
+  if (diff < 604800) return `${Math.floor(diff / 86400)} hari lalu`;
+  return d.toLocaleDateString("id-ID", { day: "numeric", month: "short", year: "numeric" });
+}
+
 function NotificationPage({ notifications }) {
   async function markRead(id) { await updateDoc(doc(db, "notifications", id), { isRead: true }); }
   async function deleteNotif(id) { await deleteDoc(doc(db, "notifications", id)); }
@@ -1855,35 +1884,126 @@ function NotificationPage({ notifications }) {
   async function markAllRead() { for (const n of notifications) await updateDoc(doc(db, "notifications", n.id), { isRead: true }); }
 
   const unread = notifications.filter((n) => !n.isRead);
+  const sorted = [...notifications].sort((a, b) => {
+    const ta = a.createdAt?.seconds || 0;
+    const tb = b.createdAt?.seconds || 0;
+    return tb - ta;
+  });
 
   return (
     <div className="page-container" style={{ maxWidth: 680 }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
-        <div style={{ fontSize: 20, fontWeight: 700 }}>🔔 Notifikasi {unread.length > 0 && <span className="badge badge-orange">{unread.length} baru</span>}</div>
-        <div style={{ display: "flex", gap: 8 }}>
-          <button className="btn-ghost btn-sm" onClick={markAllRead}>Tandai Semua Dibaca</button>
-          <button className="btn-ghost btn-sm" style={{ color: "#EF4444", borderColor: "#EF4444" }} onClick={deleteAll}>Hapus Semua</button>
-        </div>
-      </div>
-      {notifications.length === 0 ? (
-        <div className="empty-state"><div className="empty-icon">🔔</div><p>Tidak ada notifikasi</p></div>
-      ) : notifications.map((n) => (
-        <div key={n.id} className="card" style={{ marginBottom: 10, borderLeft: `4px solid ${n.isRead ? "var(--border)" : "var(--orange)"}`, background: n.isRead ? "#fff" : "#FFFAF9" }}>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
-            <div style={{ flex: 1 }}>
-              <div style={{ fontWeight: 700, marginBottom: 4, display: "flex", alignItems: "center", gap: 8 }}>
-                {n.title}
-                {!n.isRead && <span className="notif-dot" />}
-              </div>
-              <p style={{ fontSize: 13, color: "var(--text2)" }}>{n.message}</p>
-            </div>
-            <div style={{ display: "flex", gap: 6, marginLeft: 12 }}>
-              {!n.isRead && <button className="btn-ghost btn-sm" onClick={() => markRead(n.id)}>✓ Baca</button>}
-              <button className="btn-ghost btn-sm" style={{ color: "#EF4444", borderColor: "#EF4444" }} onClick={() => deleteNotif(n.id)}>🗑</button>
-            </div>
+      {/* Header */}
+      <div style={{ marginBottom: 20 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <div style={{ fontSize: 22, fontWeight: 800 }}>Notifikasi</div>
+            {unread.length > 0 && (
+              <span style={{ background: "var(--orange)", color: "#fff", fontSize: 11, fontWeight: 700, padding: "2px 8px", borderRadius: 20 }}>
+                {unread.length} belum dibaca
+              </span>
+            )}
           </div>
+          {notifications.length > 0 && (
+            <div style={{ display: "flex", gap: 8 }}>
+              {unread.length > 0 && (
+                <button className="btn-ghost btn-sm" onClick={markAllRead} style={{ fontSize: 12 }}>
+                  ✓ Tandai Semua Dibaca
+                </button>
+              )}
+              <button className="btn-ghost btn-sm" onClick={deleteAll} style={{ fontSize: 12, color: "#EF4444", borderColor: "#FECACA" }}>
+                🗑 Hapus Semua
+              </button>
+            </div>
+          )}
         </div>
-      ))}
+        {unread.length > 0 && (
+          <p style={{ fontSize: 13, color: "var(--text3)", marginTop: 6 }}>
+            Kamu memiliki {unread.length} notifikasi baru yang belum dibaca.
+          </p>
+        )}
+      </div>
+
+      {/* Empty state */}
+      {sorted.length === 0 ? (
+        <div className="empty-state">
+          <div className="empty-icon">🔔</div>
+          <p style={{ fontWeight: 600, fontSize: 15, marginBottom: 6 }}>Belum ada notifikasi</p>
+          <p style={{ fontSize: 13, color: "var(--text3)" }}>Semua aktivitas akun kamu akan muncul di sini.</p>
+        </div>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          {sorted.map((n) => {
+            const icon = NOTIF_ICONS[n.type] || "🔔";
+            const color = NOTIF_COLORS[n.type] || "var(--orange)";
+            return (
+              <div
+                key={n.id}
+                className="card"
+                style={{
+                  padding: "14px 16px",
+                  borderLeft: `4px solid ${n.isRead ? "var(--border)" : color}`,
+                  background: n.isRead ? "#fff" : "#FFFBF9",
+                  transition: "all 0.2s",
+                }}
+              >
+                <div style={{ display: "flex", gap: 12, alignItems: "flex-start" }}>
+                  {/* Icon */}
+                  <div style={{
+                    width: 40, height: 40, borderRadius: 10, flexShrink: 0,
+                    background: n.isRead ? "#F3F4F6" : `${color}18`,
+                    display: "flex", alignItems: "center", justifyContent: "center",
+                    fontSize: 18,
+                  }}>
+                    {icon}
+                  </div>
+
+                  {/* Content */}
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 8, marginBottom: 4 }}>
+                      <div style={{ fontWeight: 700, fontSize: 14, color: n.isRead ? "var(--text1)" : "#111", lineHeight: 1.3 }}>
+                        {n.title}
+                        {!n.isRead && (
+                          <span style={{ display: "inline-block", width: 7, height: 7, background: color, borderRadius: "50%", marginLeft: 6, verticalAlign: "middle" }} />
+                        )}
+                      </div>
+                      <div style={{ fontSize: 11, color: "var(--text3)", whiteSpace: "nowrap", flexShrink: 0 }}>
+                        {timeAgo(n.createdAt)}
+                      </div>
+                    </div>
+                    <p style={{ fontSize: 13, color: "var(--text2)", lineHeight: 1.6, margin: 0 }}>{n.message}</p>
+
+                    {/* Actions */}
+                    <div style={{ display: "flex", gap: 8, marginTop: 10, alignItems: "center" }}>
+                      {!n.isRead && (
+                        <button
+                          onClick={() => markRead(n.id)}
+                          style={{
+                            background: "none", border: "none", cursor: "pointer",
+                            fontSize: 12, color: color, fontWeight: 600, padding: "2px 0",
+                          }}
+                        >
+                          ✓ Tandai Dibaca
+                        </button>
+                      )}
+                      {!n.isRead && <span style={{ color: "var(--border)", fontSize: 12 }}>|</span>}
+                      <button
+                        onClick={() => deleteNotif(n.id)}
+                        style={{
+                          background: "none", border: "none", cursor: "pointer",
+                          fontSize: 12, color: "#9CA3AF", fontWeight: 500, padding: "2px 0",
+                        }}
+                      >
+                        Hapus
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+      <div style={{ height: 32 }} />
     </div>
   );
 }
