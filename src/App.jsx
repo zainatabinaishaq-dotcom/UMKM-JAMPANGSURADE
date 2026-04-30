@@ -489,7 +489,7 @@ function HomePage({ products, search, onProductClick, onAddToCart, user, profile
         <div className="hero-pattern2">🛍️</div>
         <h1>Belanja Produk UMKM<br />Lokal Berkualitas</h1>
         <p>Temukan ribuan produk UMKM terbaik dari Jampang Surade. Dukung pengusaha lokal, belanja lebih hemat!</p>
-        <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
+        <div className="hero-cta" style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
           {!user ? (
             <>
               <button className="btn-primary" style={{ background: "#fff", color: "var(--orange)", padding: "12px 24px", fontSize: 15 }} onClick={() => setPage("register")}>Mulai Belanja</button>
@@ -518,16 +518,16 @@ function HomePage({ products, search, onProductClick, onAddToCart, user, profile
 
       {/* PRODUCTS */}
       <div>
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16, flexWrap: "wrap", gap: 10 }}>
+        <div className="sort-row" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16, flexWrap: "wrap", gap: 10 }}>
           <div className="section-title" style={{ marginBottom: 0 }}>
             {activeCategory === "all" ? "Semua Produk" : activeCategory}
             <span style={{ fontSize: 13, fontWeight: 400, color: "var(--text3)", marginLeft: 8 }}>({filtered.length} produk)</span>
           </div>
-          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-            <span style={{ fontSize: 12, color: "var(--text3)" }}>Urutkan:</span>
+          <div className="sort-buttons" style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            <span style={{ fontSize: 12, color: "var(--text3)", flexShrink: 0 }}>Urutkan:</span>
             {["terbaru","termurah","termahal","terlaris"].map((s) => (
               <button key={s} onClick={() => setSortBy(s)}
-                style={{ padding: "5px 12px", borderRadius: 100, fontSize: 12, border: "1.5px solid", cursor: "pointer", fontWeight: 500,
+                style={{ padding: "5px 12px", borderRadius: 100, fontSize: 12, border: "1.5px solid", cursor: "pointer", fontWeight: 500, flexShrink: 0,
                   borderColor: sortBy === s ? "var(--orange)" : "var(--border)",
                   background: sortBy === s ? "var(--orange-light)" : "#fff",
                   color: sortBy === s ? "var(--orange)" : "var(--text2)" }}>
@@ -648,9 +648,9 @@ function LoginPage({ setPage }) {
   }
 
   return (
-    <div style={{ minHeight: "calc(100vh - 110px)", display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
+    <div className="auth-container" style={{ minHeight: "calc(100vh - 110px)", display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
       <div style={{ width: "100%", maxWidth: 420 }}>
-        <div className="card" style={{ padding: 36 }}>
+        <div className="card form-card-mobile" style={{ padding: 36 }}>
           <div style={{ textAlign: "center", marginBottom: 28 }}>
             <div style={{ fontSize: 28, fontWeight: 800, color: "var(--orange)", marginBottom: 6 }}>UMKM Digital</div>
             <div style={{ fontSize: 18, fontWeight: 700, marginBottom: 4 }}>Masuk ke Akun Anda</div>
@@ -714,9 +714,9 @@ function RegisterPage({ setPage, createNotif }) {
   }
 
   return (
-    <div style={{ minHeight: "calc(100vh - 110px)", display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
+    <div className="auth-container" style={{ minHeight: "calc(100vh - 110px)", display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
       <div style={{ width: "100%", maxWidth: 440 }}>
-        <div className="card" style={{ padding: 36 }}>
+        <div className="card form-card-mobile" style={{ padding: 36 }}>
           <div style={{ textAlign: "center", marginBottom: 28 }}>
             <div style={{ fontSize: 28, fontWeight: 800, color: "var(--orange)", marginBottom: 6 }}>UMKM Digital</div>
             <div style={{ fontSize: 18, fontWeight: 700, marginBottom: 4 }}>Buat Akun Baru</div>
@@ -914,7 +914,7 @@ function BuyerDashboard({ user, profile, orders, products, paymentSetting, creat
   return (
     <div className="dash-layout">
       <div className="dash-sidebar">
-        <div style={{ padding: "16px 20px 12px", borderBottom: "1px solid var(--border)", marginBottom: 8 }}>
+        <div className="dash-sidebar-profile">
           <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
             <div style={{ width: 44, height: 44, borderRadius: "50%", background: "var(--orange-light)", color: "var(--orange)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 20, fontWeight: 700 }}>{profile?.name?.[0]?.toUpperCase()}</div>
             <div>
@@ -1146,7 +1146,7 @@ function SellerDashboard({ user, profile, products, orders, wallets, createNotif
   return (
     <div className="dash-layout">
       <div className="dash-sidebar">
-        <div style={{ padding: "16px 20px 12px", borderBottom: "1px solid var(--border)", marginBottom: 8 }}>
+        <div className="dash-sidebar-profile">
           <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
             <div style={{ width: 44, height: 44, borderRadius: "50%", background: "var(--orange-light)", color: "var(--orange)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 20, fontWeight: 700 }}>🏪</div>
             <div>
@@ -1501,7 +1501,7 @@ function AdminDashboard({ profile, products, orders, withdrawals, paymentSetting
   return (
     <div className="dash-layout">
       <div className="dash-sidebar">
-        <div style={{ padding: "16px 20px 12px", borderBottom: "1px solid var(--border)", marginBottom: 8 }}>
+        <div className="dash-sidebar-profile">
           <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
             <div style={{ width: 44, height: 44, borderRadius: "50%", background: "#3B82F615", color: "#3B82F6", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 20 }}>🛡️</div>
             <div>
