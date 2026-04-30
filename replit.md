@@ -1,13 +1,13 @@
-# UMKM Jampang Surade
+# UMKM Digital - Marketplace Jampang Surade
 
-A marketplace web application for local micro, small, and medium enterprises (UMKMs) in Jampang Surade.
+Marketplace e-commerce profesional seperti Shopee untuk UMKM lokal Jampang Surade.
 
 ## Overview
 
-Multi-role marketplace supporting:
-- **Buyers**: Browse products, add to cart, checkout with multiple shipping options
-- **Sellers**: Upload products (admin approval required), manage orders, request balance withdrawals
-- **Admins**: Manage user registrations, product approvals, payment settings, and withdrawal requests
+Multi-role marketplace dengan UI modern Shopee-style:
+- **Buyers**: Landing page, search, kategori, keranjang (cart drawer), checkout form, riwayat order, ulasan
+- **Sellers**: Dashboard toko, manajemen produk, pesanan masuk, penarikan saldo, profil toko
+- **Admins**: Statistik, kelola order/produk/penarikan, rekening pembayaran, saldo manual, tambah admin
 
 ## Tech Stack
 
@@ -15,45 +15,50 @@ Multi-role marketplace supporting:
 - **Database/Auth**: Firebase (Firestore + Authentication)
 - **Image Hosting**: Cloudinary
 - **Shipping API**: RajaOngkir
-- **Styling**: Inline CSS within React components
-- **PWA**: Service Worker + Web App Manifest
+- **Styling**: Custom CSS (index.css) dengan desain Shopee-style
+- **Font**: Inter (Google Fonts)
+
+## Design System
+
+- **Primary Color**: #EE4D2D (Shopee Orange)
+- **Background**: #F5F5F5
+- **Layout**: Sticky navbar, sidebar dashboard, grid produk 5 kolom
+
+## Key Features
+
+- Sticky navbar dengan search bar, cart icon, notifikasi badge
+- Hero banner gradient dengan CTA
+- Filter kategori produk (Makanan, Fashion, dll)
+- Sort produk (Terbaru, Termurah, Termahal, Terlaris)
+- Cart drawer dari kanan dengan qty control
+- Checkout form proper (tidak lagi pakai browser prompt)
+- Product detail modal
+- Sidebar dashboard untuk Buyer, Seller, Admin
+- Tabel produk/order untuk admin
+- Status badge berwarna (pending, aktif, selesai, dll)
 
 ## Project Structure
 
 ```
-.
-├── api/                    # Serverless API handlers (RajaOngkir)
-│   ├── cities.js           # Fetch city data
-│   └── ongkir.js           # Calculate shipping costs
-├── public/                 # Static assets + PWA config
-├── src/
-│   ├── services/
-│   │   ├── cloudinary.js   # Cloudinary upload logic
-│   │   └── firebase.js     # Firebase initialization
-│   ├── App.jsx             # Main app component
-│   └── main.jsx            # React entry point
-├── index.html
-├── vite.config.js          # Vite config (port 5000, host 0.0.0.0, allowedHosts: true)
-└── package.json
+src/
+├── App.jsx           # Main app + semua komponen
+├── index.css         # Design system & semua styles
+├── main.jsx          # React entry point
+└── services/
+    ├── firebase.js   # Firebase config
+    └── cloudinary.js # Upload gambar
+api/
+├── cities.js         # RajaOngkir cities
+└── ongkir.js         # Kalkulasi ongkir
 ```
-
-## Environment Variables
-
-Stored in `.env`:
-- `VITE_FIREBASE_*` - Firebase configuration
-- `VITE_CLOUDINARY_CLOUD_NAME` - Cloudinary cloud name
-- `VITE_CLOUDINARY_UPLOAD_PRESET` - Cloudinary upload preset
-- `RAJAONGKIR_API_KEY` - RajaOngkir API key
 
 ## Development
 
 ```bash
 npm install
-npm run dev   # Starts on port 5000
+npm run dev   # Port 5000
 ```
 
 ## Deployment
 
-Configured as a static site deployment:
-- Build: `npm run build`
-- Public dir: `dist`
+Static site: build → dist
