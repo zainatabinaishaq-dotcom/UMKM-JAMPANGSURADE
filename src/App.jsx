@@ -210,44 +210,30 @@ export default function App() {
 
   function navGoTo(p) { setPage(p); setShowCart(false); setSelectedProduct(null); }
 
-  const isDashPage = page === "buyer" || page === "seller" || page === "admin" || page === "notif";
-
   return (
     <div style={{ minHeight: "100vh", background: "var(--bg)" }}>
-      {/* NAVBAR */}
-      <div className="nav-sticky">
-        <div style={{ background: "var(--orange)", padding: "10px 0" }}>
+      {/* ── DESKTOP NAVBAR ── */}
+      <div className="nav-sticky nav-desktop">
+        <div style={{ background: "var(--orange)" }}>
           <div className="nav-inner">
-            <div className="nav-logo" onClick={() => navGoTo("home")}>
-              UMKM<span>Digital</span>
-            </div>
-            {/* Search */}
-            <div className="nav-search" style={{ flex: 1, maxWidth: 560 }}>
-              <input
-                placeholder="Cari produk, toko..."
-                value={search}
+            <div className="nav-logo" onClick={() => navGoTo("home")}>UMKM<span>Digital</span></div>
+            <div className="nav-search">
+              <input placeholder="Cari produk, toko..." value={search}
                 onChange={(e) => setSearch(e.target.value)}
-                onKeyDown={(e) => { if (e.key === "Enter") navGoTo("home"); }}
-              />
+                onKeyDown={(e) => { if (e.key === "Enter") navGoTo("home"); }} />
               <button onClick={() => navGoTo("home")}>🔍</button>
             </div>
-            {/* Actions */}
             <div className="nav-actions">
-              {/* Cart */}
               {user && (
                 <button className="nav-icon-btn" onClick={() => setShowCart(!showCart)}>
-                  🛒
-                  {cartCount > 0 && <span className="badge-count">{cartCount}</span>}
+                  🛒{cartCount > 0 && <span className="badge-count">{cartCount}</span>}
                 </button>
               )}
-              {/* Notif */}
               {user && (
                 <button className="nav-icon-btn" onClick={() => navGoTo("notif")}>
-                  🔔
-                  {unreadNotif > 0 && <span className="badge-count">{unreadNotif}</span>}
+                  🔔{unreadNotif > 0 && <span className="badge-count">{unreadNotif}</span>}
                 </button>
               )}
-              {/* Auth */}
               {!user ? (
                 <>
                   <button className="nav-btn" onClick={() => navGoTo("login")}>Masuk</button>
@@ -255,15 +241,9 @@ export default function App() {
                 </>
               ) : (
                 <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                  {profile?.role === "buyer" && (
-                    <button className="nav-btn" onClick={() => navGoTo("buyer")}>Dashboard</button>
-                  )}
-                  {profile?.role === "seller" && (
-                    <button className="nav-btn" onClick={() => navGoTo("seller")}>Toko Saya</button>
-                  )}
-                  {(profile?.role === "admin" || profile?.role === "sub_admin") && (
-                    <button className="nav-btn" onClick={() => navGoTo("admin")}>Admin Panel</button>
-                  )}
+                  {profile?.role === "buyer" && <button className="nav-btn" onClick={() => navGoTo("buyer")}>Dashboard</button>}
+                  {profile?.role === "seller" && <button className="nav-btn" onClick={() => navGoTo("seller")}>Toko Saya</button>}
+                  {(profile?.role === "admin" || profile?.role === "sub_admin") && <button className="nav-btn" onClick={() => navGoTo("admin")}>Admin Panel</button>}
                   <button className="nav-user-btn" onClick={() => { signOut(auth); navGoTo("home"); }}>
                     <div className="nav-avatar">{profile?.name?.[0]?.toUpperCase() || "U"}</div>
                     <span style={{ maxWidth: 80, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{profile?.name || "User"}</span>
@@ -271,6 +251,36 @@ export default function App() {
                 </div>
               )}
             </div>
+          </div>
+        </div>
+      </div>
+
+      {/* ── MOBILE NAVBAR ── */}
+      <div className="nav-sticky nav-mobile">
+        <div className="nav-mobile-top">
+          <span className="nav-mobile-logo" onClick={() => navGoTo("home")}>UMKM<span style={{ opacity: 0.8 }}>Digital</span></span>
+          <div className="nav-mobile-icons">
+            {user && (
+              <button className="nav-icon-btn" onClick={() => setShowCart(!showCart)} style={{ fontSize: 20, padding: "4px 6px" }}>
+                🛒{cartCount > 0 && <span className="badge-count">{cartCount}</span>}
+              </button>
+            )}
+            {user && (
+              <button className="nav-icon-btn" onClick={() => navGoTo("notif")} style={{ fontSize: 20, padding: "4px 6px" }}>
+                🔔{unreadNotif > 0 && <span className="badge-count">{unreadNotif}</span>}
+              </button>
+            )}
+            {!user && (
+              <button onClick={() => navGoTo("login")} style={{ background: "rgba(255,255,255,0.2)", border: "none", color: "#fff", padding: "7px 14px", borderRadius: 6, fontWeight: 600, fontSize: 13 }}>Masuk</button>
+            )}
+          </div>
+        </div>
+        <div className="nav-mobile-bottom">
+          <div className="nav-search" style={{ flex: 1 }}>
+            <input placeholder="Cari produk, toko..." value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter") navGoTo("home"); }} />
+            <button onClick={() => navGoTo("home")}>🔍</button>
           </div>
         </div>
       </div>
@@ -380,8 +390,8 @@ export default function App() {
         <NotificationPage notifications={notifications} />
       )}
 
-      {/* FOOTER */}
-      <footer style={{ background: "#222", color: "#aaa", padding: "32px 16px", marginTop: 40 }}>
+      {/* FOOTER — hidden on mobile */}
+      <footer style={{ background: "#222", color: "#aaa", padding: "32px 16px", marginTop: 40 }} className="footer-desktop">
         <div style={{ maxWidth: 1200, margin: "0 auto" }}>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 32, marginBottom: 24 }}>
             <div>
@@ -405,6 +415,53 @@ export default function App() {
           </div>
         </div>
       </footer>
+
+      {/* ── BOTTOM NAVIGATION (mobile only) ── */}
+      <nav className="bottom-nav">
+        <button className={`bottom-nav-item ${page === "home" ? "active" : ""}`} onClick={() => navGoTo("home")}>
+          <span className="nav-icon">🏠</span>
+          <span>Beranda</span>
+        </button>
+        <button className={`bottom-nav-item ${page === "home" && false ? "active" : ""}`}
+          onClick={() => { navGoTo("home"); }}>
+          <span className="nav-icon">🏪</span>
+          <span>Kategori</span>
+        </button>
+        {user ? (
+          <button className="bottom-nav-item" onClick={() => setShowCart(true)} style={{ position: "relative" }}>
+            <span className="nav-icon">🛒</span>
+            {cartCount > 0 && <span className="nav-badge">{cartCount}</span>}
+            <span>Keranjang</span>
+          </button>
+        ) : (
+          <button className={`bottom-nav-item ${page === "register" ? "active" : ""}`} onClick={() => navGoTo("register")}>
+            <span className="nav-icon">📝</span>
+            <span>Daftar</span>
+          </button>
+        )}
+        {user ? (
+          <button className={`bottom-nav-item ${page === "notif" ? "active" : ""}`} onClick={() => navGoTo("notif")} style={{ position: "relative" }}>
+            <span className="nav-icon">🔔</span>
+            {unreadNotif > 0 && <span className="nav-badge">{unreadNotif}</span>}
+            <span>Notifikasi</span>
+          </button>
+        ) : (
+          <button className={`bottom-nav-item ${page === "login" ? "active" : ""}`} onClick={() => navGoTo("login")}>
+            <span className="nav-icon">🔔</span>
+            <span>Notifikasi</span>
+          </button>
+        )}
+        <button className={`bottom-nav-item ${["buyer","seller","admin","login"].includes(page) ? "active" : ""}`}
+          onClick={() => {
+            if (!user) navGoTo("login");
+            else if (profile?.role === "buyer") navGoTo("buyer");
+            else if (profile?.role === "seller") navGoTo("seller");
+            else navGoTo("admin");
+          }}>
+          <span className="nav-icon">👤</span>
+          <span>{user ? "Akun" : "Masuk"}</span>
+        </button>
+      </nav>
     </div>
   );
 }
