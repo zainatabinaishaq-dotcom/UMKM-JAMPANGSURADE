@@ -28,8 +28,6 @@ import "./index.css";
 
 const complaintEmail = "umkmdigitalecommerce@gmail.com";
 const rupiah = (n) => `Rp${Number(n || 0).toLocaleString("id-ID")}`;
-const formatRating = (value) => Number(value || 0).toFixed(1);
-const isApprovedStatus = (status) => status === "approved" || status === "active";
 
 
 function getMillis(value) {
@@ -187,6 +185,7 @@ export default function App() {
   const [paymentSetting, setPaymentSetting] = useState(null);
   const [manualBalance, setManualBalance] = useState(null);
   const [wallets, setWallets] = useState([]);
+  const [allUsers, setAllUsers] = useState([]);
   const [loading, setLoading] = useState(true);
   const [cart, setCart] = useState([]);
   const [showCart, setShowCart] = useState(false);
@@ -217,9 +216,6 @@ export default function App() {
   useEffect(() => {
     const unsub = onSnapshot(collection(db, "products"), (snap) => {
       setProducts(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
-    }, (error) => {
-      console.error("Gagal memuat products:", error);
-      setProducts([]);
     });
     return () => unsub();
   }, []);
@@ -227,9 +223,6 @@ export default function App() {
   useEffect(() => {
     const unsub = onSnapshot(collection(db, "orders"), (snap) => {
       setOrders(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
-    }, (error) => {
-      console.error("Gagal memuat orders:", error);
-      setOrders([]);
     });
     return () => unsub();
   }, []);
@@ -237,9 +230,6 @@ export default function App() {
   useEffect(() => {
     const unsub = onSnapshot(collection(db, "withdrawals"), (snap) => {
       setWithdrawals(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
-    }, (error) => {
-      console.error("Gagal memuat withdrawals:", error);
-      setWithdrawals([]);
     });
     return () => unsub();
   }, []);
@@ -247,9 +237,13 @@ export default function App() {
   useEffect(() => {
     const unsub = onSnapshot(collection(db, "seller_wallets"), (snap) => {
       setWallets(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
-    }, (error) => {
-      console.error("Gagal memuat seller_wallets:", error);
-      setWallets([]);
+    });
+    return () => unsub();
+  }, []);
+
+  useEffect(() => {
+    const unsub = onSnapshot(collection(db, "users"), (snap) => {
+      setAllUsers(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
     });
     return () => unsub();
   }, []);
@@ -508,8 +502,8 @@ export default function App() {
           onLogout={() => { signOut(auth); navGoTo("home"); }} />
       )}
       {page === "admin" && (profile?.role === "admin" || profile?.role === "sub_admin") && (
-        <AdminDashboard profile={profile || {}} products={products || []} orders={orders || []} withdrawals={withdrawals || []}
-          paymentSetting={paymentSetting || null} manualBalance={manualBalance || null} wallets={wallets || []} createNotif={createNotif}
+        <AdminDashboard profile={profile} products={products} orders={orders} withdrawals={withdrawals}
+          paymentSetting={paymentSetting} manualBalance={manualBalance} wallets={wallets} users={allUsers} createNotif={createNotif}
           onLogout={() => { signOut(auth); navGoTo("home"); }} />
       )}
       {page === "notif" && user && (
@@ -711,7 +705,7 @@ function ProductCard({ product, onClick, onAddToCart, user }) {
         <div className="product-name">{product.productName}</div>
         <div className="product-price">{rupiah(product.price)}</div>
         <div className="product-meta">
-          <span>⭐ {formatRating(product.averageRating)}</span>
+          <span>⭐ {(product.averageRating || 0).toFixed(1)}</span>
           <span>·</span>
           <span>{product.totalReviews || 0} terjual</span>
         </div>
@@ -742,7 +736,7 @@ function ProductDetailModal({ product, onClose, onAddToCart, user, profile }) {
               <div style={{ fontSize: 18, fontWeight: 700, marginBottom: 8 }}>{product.productName}</div>
               <div style={{ fontSize: 24, fontWeight: 800, color: "var(--orange)", marginBottom: 12 }}>{rupiah(product.price)}</div>
               <div style={{ display: "flex", gap: 12, marginBottom: 12 }}>
-                <span style={{ fontSize: 13, color: "var(--text2)" }}>⭐ {formatRating(product.averageRating)}</span>
+                <span style={{ fontSize: 13, color: "var(--text2)" }}>⭐ {(product.averageRating || 0).toFixed(1)}</span>
                 <span style={{ fontSize: 13, color: "var(--text2)" }}>| {product.totalReviews || 0} terjual</span>
                 <span className={`badge ${statusLabel(product.status).cls}`}>{statusLabel(product.status).label}</span>
               </div>
@@ -899,7 +893,7 @@ function RegisterPage({ setPage, createNotif }) {
             </div>
             {form.role === "seller" && (
               <div style={{ background: "#FFF8E1", border: "1px solid #F59E0B", borderRadius: 8, padding: "10px 14px", fontSize: 12, color: "#92400E" }}>
-                ✅ Akun seller bisa langsung upload produk.
+                ⏳ Akun seller harus disetujui admin dulu sebelum bisa upload produk.
               </div>
             )}
             <button className="btn-primary" style={{ width: "100%", justifyContent: "center", padding: 13, fontSize: 15 }} disabled={loading}>
@@ -1152,14 +1146,49 @@ function BuyerOrderCard({ order, createNotif, paymentSetting }) {
         <div style={{ flex: 1, minWidth: 180 }}>
           <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 6, flexWrap: "wrap" }}><span style={{ fontWeight: 700, fontSize: 15 }}>{order.productName}</span><span className={`badge ${s.cls}`}>{s.label}</span></div>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(140px, 1fr))", gap: "4px 16px", fontSize: 13, color: "var(--text2)" }}><span>Qty: {order.quantity}</span><span>Subtotal: {rupiah(order.productTotal)}</span><span>Ongkir: {rupiah(order.shippingCost)}</span><span>Total: <b style={{ color: "var(--orange)" }}>{rupiah(order.totalAmount)}</b></span><span>Kurir: {order.courierName}</span>{order.trackingNumber && <span>Resi: <b>{order.trackingNumber}</b></span>}</div>
-          {order.sellerMapLink && order.shippingType === "pickup" && <div style={{ marginTop: 8, fontSize: 13 }}><b>Link lokasi toko:</b> <a href={order.sellerMapLink} target="_blank" rel="noreferrer">Buka Google Maps</a><div style={{ color: "var(--orange)", fontWeight: 700 }}>Segera ambil pesanan anda</div></div>}
-          {order.buyerMapsLink && <div style={{ marginTop: 8, fontSize: 13 }}><b>Link lokasi Anda:</b> <a href={order.buyerMapsLink} target="_blank" rel="noreferrer">Buka Maps</a></div>}
+          {order.sellerMapLink && order.shippingType === "pickup" && <div style={{ marginTop: 8, fontSize: 13 }}><b>Link lokasi toko:</b> <button type="button" className="btn-primary btn-sm" style={{ marginLeft: 8 }} onClick={() => window.open(order.sellerMapLink, "_blank")}>Buka Maps Toko</button><div style={{ color: "var(--orange)", fontWeight: 700, marginTop: 6 }}>Segera ambil pesanan anda</div></div>}
+          
           {order.statusPembayaran === "menunggu_ongkir" && <div style={{ marginTop: 8, padding: 10, background: "#FFF8E1", borderRadius: 8, color: "#92400E", fontSize: 13 }}>Penjual sedang menghitung ongkir. Tombol pembayaran aktif setelah ongkir dikirim.</div>}
           {order.trackingNumber && <div style={{ marginTop: 8, display: "flex", gap: 8, flexWrap: "wrap" }}><button className="btn-ghost btn-sm" onClick={() => navigator.clipboard.writeText(order.trackingNumber)}>Salin Resi</button><a className="btn-primary btn-sm" href="https://parcelsapp.com/id" target="_blank" rel="noreferrer" style={{ textDecoration: "none" }}>Lacak Paket</a></div>}
         </div>
       </div>
       {order.paymentProofUrl && <div style={{ marginTop: 10 }}><img src={order.paymentProofUrl} alt="Bukti" style={{ width: 180, height: 120, objectFit: "cover", borderRadius: 8 }} /></div>}
-      {order.statusPesanan === "menunggu_pembayaran" && order.statusPembayaran !== "menunggu_ongkir" && !order.proofSubmitted && !order.paymentProofUrl && order.paymentMethod === "transfer" && order.shippingType !== "pickup" && <div style={{ marginTop: 14, paddingTop: 14, borderTop: "1px solid var(--border)" }}><div style={{ background: "#FFF8E1", borderRadius: 8, padding: 12, marginBottom: 12, fontSize: 13 }}><div style={{ fontWeight: 700, marginBottom: 6 }}>Rekening Pembayaran</div><div>Bank: <b>{paymentSetting?.bankName || "Belum diatur admin"}</b></div><div>No Rekening: <b>{paymentSetting?.accountNumber || "-"}</b></div><div>Atas Nama: <b>{paymentSetting?.accountHolder || "-"}</b></div><div style={{ color: "var(--orange)", fontWeight: 700, marginTop: 6 }}>Jika sudah bayar kirimkan bukti pembayaran</div></div><div style={{ fontSize: 13, fontWeight: 600, marginBottom: 8 }}>Upload Bukti Pembayaran</div><div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}><input type="file" accept="image/jpeg,image/png,image/webp" onChange={(e) => { if (e.target.files[0]?.size > 1024*1024) { alert("Maks 1MB"); return; } setFile(e.target.files[0]); }} style={{ fontSize: 13, flex: 1 }} /><button className="btn-primary btn-sm" onClick={uploadProof} disabled={uploadLoading}>{uploadLoading ? "Mengirim..." : "Kirim Bukti"}</button></div></div>}
+      {order.statusPesanan === "menunggu_pembayaran" &&
+        order.statusPembayaran !== "menunggu_ongkir" &&
+        !order.proofSubmitted &&
+        !order.paymentProofUrl &&
+        order.paymentMethod === "transfer" &&
+        order.shippingType !== "pickup" && (
+        <div style={{ marginTop: 14, paddingTop: 14, borderTop: "1px solid var(--border)" }}>
+          {/* WAJIB URUT: INFO REKENING ADMIN → UPLOAD BUKTI → TOMBOL KIRIM BUKTI */}
+          <div style={{ background: "#FFF8E1", borderRadius: 10, padding: 14, marginBottom: 12, fontSize: 13, border: "1px solid #FDE68A" }}>
+            <div style={{ fontWeight: 800, marginBottom: 8, color: "#92400E" }}>💳 INFO REKENING ADMIN</div>
+            <div>Bank: <b>{paymentSetting?.bankName || "Belum diatur admin"}</b></div>
+            <div>No Rekening: <b>{paymentSetting?.accountNumber || "-"}</b></div>
+            <div>Atas Nama: <b>{paymentSetting?.accountHolder || "-"}</b></div>
+            <div style={{ color: "var(--orange)", fontWeight: 800, marginTop: 8 }}>Jika sudah bayar kirimkan bukti pembayaran</div>
+          </div>
+
+          <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 8 }}>Upload Bukti Pembayaran</div>
+          <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+            <input
+              type="file"
+              accept="image/jpeg,image/png,image/webp"
+              onChange={(e) => {
+                if (e.target.files[0]?.size > 1024 * 1024) {
+                  alert("Maks 1MB");
+                  return;
+                }
+                setFile(e.target.files[0]);
+              }}
+              style={{ fontSize: 13, flex: 1 }}
+            />
+            <button className="btn-primary btn-sm" onClick={uploadProof} disabled={uploadLoading}>
+              {uploadLoading ? "Mengirim..." : "Kirim Bukti"}
+            </button>
+          </div>
+        </div>
+      )}
       <div style={{ marginTop: 12, display: "flex", gap: 10, flexWrap: "wrap" }}>{order.statusPesanan === "dikirim" && !order.receivedAt && <button className="btn-primary btn-sm" onClick={received}>✅ Sudah Sampai</button>}{order.statusPesanan === "selesai" && !order.reviewSubmitted && <button className="btn-outline btn-sm" onClick={() => setShowReview(!showReview)}>⭐ Beri Ulasan</button>}</div>
       {showReview && !order.reviewSubmitted && <div style={{ marginTop: 14, padding: 14, background: "var(--bg)", borderRadius: 8 }}><div style={{ fontWeight: 600, marginBottom: 8 }}>Beri Ulasan</div><div style={{ display: "flex", gap: 8, marginBottom: 10 }}>{[1,2,3,4,5].map((r) => <button key={r} onClick={() => setRating(r)} style={{ background: rating >= r ? "#F59E0B" : "#fff", border: "1.5px solid", borderColor: rating >= r ? "#F59E0B" : "var(--border)", padding: "4px 10px", borderRadius: 6, cursor: "pointer", fontWeight: 700 }}>⭐</button>)}</div><textarea className="form-input" rows={2} placeholder="Tulis komentar Anda..." value={comment} onChange={(e) => setComment(e.target.value)} style={{ marginBottom: 8 }} /><button className="btn-primary btn-sm" onClick={sendReview}>Kirim Ulasan</button></div>}
     </div>
@@ -1180,7 +1209,7 @@ function BuyerProfile({ profile }) {
           </div>
         </div>
         <div className="divider" />
-        {[["Email", profile?.email],["WhatsApp", profile?.whatsapp || "-"],["Status Akun", isApprovedStatus(profile?.status) ? "✅ Aktif" : profile?.status]].map(([l,v]) => (
+        {[["Email", profile?.email],["WhatsApp", profile?.whatsapp || "-"],["Status Akun", profile?.status === "active" ? "✅ Aktif" : profile?.status]].map(([l,v]) => (
           <div key={l} style={{ display: "flex", justifyContent: "space-between", padding: "10px 0", borderBottom: "1px solid var(--border)", fontSize: 14 }}>
             <span style={{ color: "var(--text2)" }}>{l}</span>
             <span style={{ fontWeight: 500 }}>{v}</span>
@@ -1192,11 +1221,9 @@ function BuyerProfile({ profile }) {
 }
 
 /* ─── SELLER DASHBOARD ───────────────────────── */
-function SellerDashboard({ user, profile, products = [], orders = [], wallets = [], createNotif, onLogout }) {
+function SellerDashboard({ user, profile, products, orders, wallets, createNotif, onLogout }) {
   const [tab, setTab] = useState("beranda");
-  const sellerProducts = Array.isArray(products) ? products : [];
-  const sellerOrders = Array.isArray(orders) ? orders : [];
-  const wallet = (Array.isArray(wallets) ? wallets : []).find((w) => w?.sellerId === user?.uid);
+  const wallet = wallets.find((w) => w.sellerId === user.uid);
   const tabs = [
     { id: "beranda", label: "Beranda", icon: "🏠" },
     { id: "produk", label: "Produk Saya", icon: "📦" },
@@ -1233,9 +1260,9 @@ function SellerDashboard({ user, profile, products = [], orders = [], wallets = 
             <div style={{ fontSize: 20, fontWeight: 700, marginBottom: 20 }}>Dashboard Toko 🏪</div>
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 14, marginBottom: 28 }}>
               {[
-                { label: "Total Produk", value: safeProducts.length, icon: "📦", color: "#EE4D2D" },
-                { label: "Produk Aktif", value: sellerProducts.filter((p) => p?.status === "active").length, icon: "✅", color: "#10B981" },
-                { label: "Total Order", value: safeOrders.length, icon: "🛒", color: "#3B82F6" },
+                { label: "Total Produk", value: products.length, icon: "📦", color: "#EE4D2D" },
+                { label: "Produk Aktif", value: products.filter((p) => p.status === "active").length, icon: "✅", color: "#10B981" },
+                { label: "Total Order", value: orders.length, icon: "🛒", color: "#3B82F6" },
                 { label: "Saldo Tersedia", value: rupiah(wallet?.saldoTersedia || 0), icon: "💰", color: "#F59E0B" },
                 { label: "Total Penjualan", value: rupiah(wallet?.totalPenjualan || 0), icon: "📈", color: "#8B5CF6" },
               ].map((s) => (
@@ -1249,41 +1276,41 @@ function SellerDashboard({ user, profile, products = [], orders = [], wallets = 
             {profile?.status === "pending" && (
               <div style={{ background: "#FFF8E1", border: "1px solid #F59E0B", borderRadius: 10, padding: 16, marginBottom: 20 }}>
                 <div style={{ fontWeight: 700, color: "#92400E", marginBottom: 4 }}>⏳ Akun Menunggu Verifikasi</div>
-                <p style={{ fontSize: 13, color: "#78350F" }}>Akun seller Anda sedang dalam proses verifikasi oleh admin. Anda sudah bisa menambahkan produk, namun produk akan aktif setelah admin menyetujui.</p>
+                <p style={{ fontSize: 13, color: "#78350F" }}>Akun seller Anda sedang dalam proses verifikasi oleh admin. Setelah admin menyetujui akun, fitur upload produk akan aktif.</p>
               </div>
             )}
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
               <div className="card">
                 <div style={{ fontWeight: 700, marginBottom: 12 }}>📊 Order Terbaru</div>
-                {sortNewest(sellerOrders).slice(0, 4).map((o) => (
+                {sortNewest(orders).slice(0, 4).map((o) => (
                   <div key={o.id} style={{ display: "flex", justifyContent: "space-between", padding: "8px 0", borderBottom: "1px solid var(--border)", fontSize: 13 }}>
                     <span style={{ color: "var(--text2)" }}>{o.productName}</span>
                     <span className={`badge ${statusLabel(o.statusPesanan).cls}`}>{statusLabel(o.statusPesanan).label}</span>
                   </div>
                 ))}
-                {sellerOrders.length === 0 && <p style={{ fontSize: 13, color: "var(--text3)" }}>Belum ada order</p>}
+                {orders.length === 0 && <p style={{ fontSize: 13, color: "var(--text3)" }}>Belum ada order</p>}
               </div>
               <div className="card">
                 <div style={{ fontWeight: 700, marginBottom: 12 }}>📦 Produk Terbaru</div>
-                {sellerProducts.slice(0, 4).map((p) => (
+                {products.slice(0, 4).map((p) => (
                   <div key={p.id} style={{ display: "flex", justifyContent: "space-between", padding: "8px 0", borderBottom: "1px solid var(--border)", fontSize: 13 }}>
                     <span style={{ color: "var(--text2)" }}>{p.productName}</span>
                     <span className={`badge ${statusLabel(p.status).cls}`}>{statusLabel(p.status).label}</span>
                   </div>
                 ))}
-                {sellerProducts.length === 0 && <p style={{ fontSize: 13, color: "var(--text3)" }}>Belum ada produk</p>}
+                {products.length === 0 && <p style={{ fontSize: 13, color: "var(--text3)" }}>Belum ada produk</p>}
               </div>
             </div>
           </div>
         )}
-        {tab === "produk" && <AddProduct user={user} profile={profile} products={sellerProducts} createNotif={createNotif} />}
-        {tab === "order" && <SellerOrders orders={sellerOrders} createNotif={createNotif} />}
+        {tab === "produk" && <AddProduct user={user} profile={profile} products={products} createNotif={createNotif} />}
+        {tab === "order" && <SellerOrders orders={orders} createNotif={createNotif} />}
         {tab === "withdraw" && <Withdraw user={user} profile={profile} wallet={wallet} createNotif={createNotif} />}
         {tab === "profil" && (
           <div>
             <div style={{ fontSize: 18, fontWeight: 700, marginBottom: 16 }}>🏪 Profil Toko</div>
             <div className="card" style={{ maxWidth: 480 }}>
-              {[["Nama Toko", profile?.name],["Email", profile?.email],["WhatsApp", profile?.whatsapp || "-"],["Status", isApprovedStatus(profile?.status) ? "✅ Aktif" : "⏳ Pending"],["Saldo Tersedia", rupiah(wallet?.saldoTersedia || 0)],["Total Penjualan", rupiah(wallet?.totalPenjualan || 0)]].map(([l,v]) => (
+              {[["Nama Toko", profile?.name],["Email", profile?.email],["WhatsApp", profile?.whatsapp || "-"],["Status", profile?.status === "active" ? "✅ Aktif" : "⏳ Pending"],["Saldo Tersedia", rupiah(wallet?.saldoTersedia || 0)],["Total Penjualan", rupiah(wallet?.totalPenjualan || 0)]].map(([l,v]) => (
                 <div key={l} style={{ display: "flex", justifyContent: "space-between", padding: "10px 0", borderBottom: "1px solid var(--border)", fontSize: 14 }}>
                   <span style={{ color: "var(--text2)" }}>{l}</span>
                   <span style={{ fontWeight: 500 }}>{v}</span>
@@ -1297,14 +1324,30 @@ function SellerDashboard({ user, profile, products = [], orders = [], wallets = 
   );
 }
 
-function AddProduct({ user, profile, products = [], createNotif }) {
-  const sellerApproved = isApprovedStatus(profile?.status);
-  const safeProducts = Array.isArray(products) ? products : [];
+function AddProduct({ user, profile, products, createNotif }) {
   const [form, setForm] = useState({ productName: "", category: "", subCategory: "", price: "", stock: "", description: "", weightGram: "", sellerAddress: "", sellerLatitude: "", sellerLongitude: "", sellerMapLink: "" });
   const [file, setFile] = useState(null);
   const [preview, setPreview] = useState("");
   const [loading, setLoading] = useState(false);
   const [showForm, setShowForm] = useState(false);
+  const sellerApproved = profile?.status === "active" || profile?.status === "approved";
+
+  if (!sellerApproved) {
+    return (
+      <div>
+        <div style={{ fontSize: 18, fontWeight: 700, marginBottom: 16 }}>📦 Produk Saya</div>
+        <div className="card" style={{ border: "1px solid #F59E0B", background: "#FFF8E1" }}>
+          <div style={{ fontSize: 18, fontWeight: 800, color: "#92400E", marginBottom: 8 }}>⏳ Akun Seller Belum Disetujui</div>
+          <p style={{ fontSize: 14, color: "#78350F", lineHeight: 1.6 }}>
+            Akun seller kamu masih menunggu approval admin. Setelah admin menyetujui akun kamu, tombol upload produk akan aktif otomatis.
+          </p>
+          <div style={{ marginTop: 12, padding: 12, borderRadius: 10, background: "#fff", fontSize: 13, color: "var(--text2)" }}>
+            Status akun: <b>{profile?.status || "pending"}</b>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   function handleFile(e) {
     const f = e.target.files[0];
@@ -1324,12 +1367,12 @@ function AddProduct({ user, profile, products = [], createNotif }) {
       price: Number(form.price), stock: Number(form.stock), description: form.description,
       weightGram: Number(form.weightGram || 1000), sellerAddress: form.sellerAddress,
       sellerLatitude: Number(form.sellerLatitude || 0), sellerLongitude: Number(form.sellerLongitude || 0), sellerMapLink: form.sellerMapLink,
-      imageUrl, status: (form.category === "Jasa Lokal" && form.subCategory === "Jasa Pijat") ? "pending" : "active", isDeleted: false, commissionType: "percent", commissionValue: 10,
+      imageUrl, status: "active", isDeleted: false, commissionType: "percent", commissionValue: 10,
       averageRating: 0, totalReviews: 0, createdAt: serverTimestamp(), updatedAt: serverTimestamp(),
     });
     await createNotif({ role: "admin", type: "product_new", title: "Produk Baru", message: `${profile.name} upload produk ${form.productName}`, productId: ref.id });
     setLoading(false); setShowForm(false); setFile(null); setPreview("");
-    alert((form.category === "Jasa Lokal" && form.subCategory === "Jasa Pijat") ? "Jasa Pijat berhasil diupload dan menunggu approval admin." : "Produk berhasil diupload dan langsung aktif.");
+    alert("Produk berhasil diupload dan langsung aktif.");
   }
 
   async function quickEditProduct(p) {
@@ -1346,13 +1389,20 @@ function AddProduct({ user, profile, products = [], createNotif }) {
     await updateDoc(doc(db, "products", p.id), { isDeleted: true, updatedAt: serverTimestamp() });
     alert("Produk berhasil dihapus");
   }
+
+  async function editSellerMapLink(p) {
+    const link = prompt("Link Google Maps toko:", p.sellerMapLink || "");
+    if (link === null) return;
+    await updateDoc(doc(db, "products", p.id), { sellerMapLink: link.trim(), updatedAt: serverTimestamp() });
+    alert("Link Google Maps toko berhasil disimpan");
+  }
   return (
     <div>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
-        <div style={{ fontSize: 18, fontWeight: 700 }}>📦 Produk Saya ({safeProducts.filter((p) => !p?.isDeleted).length})</div>
-        <button className="btn-primary" disabled={!sellerApproved} onClick={() => { if (!sellerApproved) { alert("Akun seller belum disetujui admin."); return; } setShowForm(!showForm); }}>+ Tambah Produk</button>
+        <div style={{ fontSize: 18, fontWeight: 700 }}>📦 Produk Saya ({products.filter((p) => !p.isDeleted).length})</div>
+        <button className="btn-primary" onClick={() => setShowForm(!showForm)}>+ Tambah Produk</button>
       </div>
-      {showForm && sellerApproved && (
+      {showForm && (
         <div className="card" style={{ marginBottom: 20 }}>
           <div style={{ fontSize: 16, fontWeight: 700, marginBottom: 16 }}>Tambah Produk Baru</div>
           <form onSubmit={submit} style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
@@ -1419,13 +1469,7 @@ function AddProduct({ user, profile, products = [], createNotif }) {
           </form>
         </div>
       )}
-      {!sellerApproved && (
-        <div className="card" style={{ border: "1px solid #F59E0B", background: "#FFF8E1", marginBottom: 16 }}>
-          <div style={{ fontWeight: 800, color: "#92400E", marginBottom: 6 }}>⏳ Akun seller belum disetujui</div>
-          <p style={{ fontSize: 13, color: "#78350F" }}>Produk tetap bisa dilihat di sini, tapi upload produk diblokir sampai admin approve akun seller kamu.</p>
-        </div>
-      )}
-      {safeProducts.length === 0 ? (
+      {products.length === 0 ? (
         <div className="empty-state"><div className="empty-icon">📦</div><p>Belum ada produk</p></div>
       ) : (
         <div style={{ overflow: "auto" }}>
@@ -1434,22 +1478,22 @@ function AddProduct({ user, profile, products = [], createNotif }) {
               <tr><th>Produk</th><th>Kategori</th><th>Harga</th><th>Stok</th><th>Status</th><th>Rating</th><th>Aksi</th></tr>
             </thead>
             <tbody>
-              {safeProducts.filter((p) => !p?.isDeleted).map((p) => {
+              {products.filter((p) => !p.isDeleted).map((p) => {
                 const s = statusLabel(p.status);
                 return (
                   <tr key={p.id}>
                     <td>
                       <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
                         <img src={p.imageUrl || ""} alt={p.productName} style={{ width: 40, height: 40, borderRadius: 6, objectFit: "cover" }} />
-                        <span style={{ fontWeight: 500, fontSize: 13 }}>{p?.productName || "Tanpa Nama"}</span>
+                        <span style={{ fontWeight: 500, fontSize: 13 }}>{p.productName}</span>
                       </div>
                     </td>
                     <td><span style={{ fontSize: 12 }}>{p.category}{p.subCategory ? ` / ${p.subCategory}` : ""}</span></td>
                     <td><span style={{ color: "var(--orange)", fontWeight: 600 }}>{rupiah(p.price)}</span></td>
                     <td>{p.stock}</td>
                     <td><span className={`badge ${s.cls}`}>{s.label}</span></td>
-                    <td>⭐ {formatRating(p.averageRating)}</td>
-                    <td><button className="btn-ghost btn-sm" onClick={() => quickEditProduct(p)}>Edit</button> <button className="btn-ghost btn-sm" style={{ color: "#EF4444", borderColor: "#EF4444" }} onClick={() => softDeleteProduct(p)}>Hapus</button></td>
+                    <td>⭐ {(p.averageRating || 0).toFixed(1)}</td>
+                    <td><button className="btn-ghost btn-sm" onClick={() => quickEditProduct(p)}>Edit</button> <button className="btn-ghost btn-sm" onClick={() => editSellerMapLink(p)}>Edit Maps</button> <button className="btn-ghost btn-sm" style={{ color: "#EF4444", borderColor: "#EF4444" }} onClick={() => softDeleteProduct(p)}>Hapus</button></td>
                   </tr>
                 );
               })}
@@ -1465,30 +1509,144 @@ function SellerOrders({ orders, createNotif }) {
   const sortedOrders = sortNewest(orders);
   const [shipForm, setShipForm] = useState({});
   const [quoteForm, setQuoteForm] = useState({});
+
+  const isPickup = (o) => o.shippingType === "pickup";
+  const isSameDay = (o) => o.shippingType === "same_day";
+  const isExpedition = (o) => !isPickup(o) && !isSameDay(o);
+
   async function quoteShipping(o) {
     const cost = Number(String(quoteForm[o.id] || "").replace(/\D/g, ""));
     if (!cost || cost < 0) { alert("Isi harga ongkir dulu"); return; }
     const productTotal = Number(o.productTotal || 0);
     const sellerAmount = productTotal - Number(o.adminFee || 0) + cost;
     const totalAmount = productTotal + cost;
-    await updateDoc(doc(db, "orders", o.id), { shippingCost: cost, totalAmount, sellerAmount, pendingShippingQuote: false, statusPembayaran: o.paymentMethod === "cash" ? "tunai" : "menunggu_pembayaran", statusPesanan: o.paymentMethod === "cash" ? "pesanan_masuk" : "menunggu_pembayaran", courierService: `Ongkir: ${rupiah(cost)}`, updatedAt: serverTimestamp() });
+    await updateDoc(doc(db, "orders", o.id), {
+      shippingCost: cost,
+      totalAmount,
+      sellerAmount,
+      pendingShippingQuote: false,
+      statusPembayaran: o.paymentMethod === "cash" ? "tunai" : "menunggu_pembayaran",
+      statusPesanan: o.paymentMethod === "cash" ? "pesanan_masuk" : "menunggu_pembayaran",
+      courierService: `Ongkir: ${rupiah(cost)}`,
+      updatedAt: serverTimestamp()
+    });
     await createNotif({ role: "buyer", userId: o.buyerId, type: "shipping_quote_ready", title: "Ongkir Sudah Dihitung", message: `Ongkir ${o.productName} adalah ${rupiah(cost)}. Silakan lanjutkan pembayaran.`, orderId: o.id });
     alert("Ongkir dikirim ke buyer");
   }
+
   async function processOrder(o) {
+    if (isPickup(o)) {
+      alert("Ambil di tempat tidak memakai proses/kirim. Konfirmasi setelah pembeli datang.");
+      return;
+    }
     if (o.statusPembayaran !== "sudah_dibayar" && o.paymentMethod !== "cash") { alert("Order transfer harus di-approve admin dulu"); return; }
     await updateDoc(doc(db, "orders", o.id), { statusPesanan: "diproses", processedAt: serverTimestamp(), updatedAt: serverTimestamp() });
     await createNotif({ role: "buyer", userId: o.buyerId, type: "order_processing", title: "Pesanan Diproses", message: `Pesanan ${o.productName} sedang diproses seller.`, orderId: o.id });
   }
+
+  async function confirmPickup(o) {
+    if (!confirm("Konfirmasi hanya setelah pembeli sudah datang dan mengambil pesanan. Lanjutkan?")) return;
+    await updateDoc(doc(db, "orders", o.id), { statusPesanan: "selesai", pickupConfirmedAt: serverTimestamp(), receivedAt: serverTimestamp(), updatedAt: serverTimestamp() });
+    await createNotif({ role: "buyer", userId: o.buyerId, type: "order_done", title: "Pesanan Diambil", message: `Pesanan ${o.productName} sudah dikonfirmasi seller. Silakan beri ulasan bintang dan komentar.`, orderId: o.id });
+    alert("Pesanan ambil di tempat sudah dikonfirmasi. Buyer akan diminta beri ulasan.");
+  }
+
+  async function sendSameDay(o) {
+    await updateDoc(doc(db, "orders", o.id), { statusPesanan: "dikirim", expeditionName: "Same Day Lokal", trackingNumber: "", shippedAt: serverTimestamp(), updatedAt: serverTimestamp() });
+    await createNotif({ role: "buyer", userId: o.buyerId, type: "order_shipped", title: "Pesanan Same Day Dikirim", message: `Pesanan ${o.productName} sedang dikirim oleh seller.`, orderId: o.id });
+    alert("Pesanan Same Day ditandai sedang dikirim");
+  }
+
   async function sendTracking(o) {
+    if (isPickup(o) || isSameDay(o)) {
+      alert("Resi hanya untuk ekspedisi. Ambil di tempat dan Same Day tidak memakai nomor resi.");
+      return;
+    }
     const data = shipForm[o.id] || {};
     if (!data.expeditionName || !data.trackingNumber) { alert("Isi nama ekspedisi dan nomor resi"); return; }
     await updateDoc(doc(db, "orders", o.id), { statusPesanan: "dikirim", expeditionName: data.expeditionName, trackingNumber: data.trackingNumber, shippedAt: serverTimestamp(), updatedAt: serverTimestamp() });
     await createNotif({ role: "buyer", userId: o.buyerId, type: "order_shipped", title: "Pesanan Dikirim 🚚", message: `Pesanan ${o.productName} dikirim via ${data.expeditionName}. Resi: ${data.trackingNumber}`, orderId: o.id });
     alert("Resi berhasil dikirim ke buyer");
   }
+
   return (
-    <div><div style={{ fontSize: 18, fontWeight: 700, marginBottom: 20 }}>🛒 Pesanan Masuk ({sortedOrders.length})</div>{sortedOrders.length === 0 ? <div className="empty-state"><div className="empty-icon">🛒</div><p>Belum ada pesanan masuk</p></div> : sortedOrders.map((o) => { const s = statusLabel(o.statusPesanan); const needQuote = o.statusPembayaran === "menunggu_ongkir" || o.pendingShippingQuote; return <div key={o.id} className="card" style={{ marginBottom: 14 }}><div style={{ display: "flex", gap: 14, alignItems: "flex-start", flexWrap: "wrap" }}><img src={o.productImage || "https://via.placeholder.com/72?text=No"} alt={o.productName} style={{ width: 72, height: 72, borderRadius: 10, objectFit: "cover", flexShrink: 0 }} /><div style={{ flex: 1 }}><div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 6, flexWrap: "wrap" }}><span style={{ fontWeight: 700, fontSize: 15 }}>{o.productName}</span><span className={`badge ${s.cls}`}>{s.label}</span></div><div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(140px, 1fr))", gap: "4px 16px", fontSize: 13, color: "var(--text2)" }}><span>Pembeli: {o.buyerName}</span><span>WA: {o.buyerWhatsapp}</span><span>Qty: {o.quantity}</span><span>Subtotal: {rupiah(o.productTotal)}</span><span>Ongkir: {rupiah(o.shippingCost)}</span><span>Total Bayar: <b style={{ color: "var(--orange)" }}>{rupiah(o.totalAmount)}</b></span><span>Kurir: {o.courierName}</span><span>Saldo bersih: <b style={{ color: "#10B981" }}>{rupiah(o.sellerAmount)}</b></span></div>{o.buyerAddress && <div style={{ fontSize: 12, color: "var(--text3)", marginTop: 4 }}>📍 {o.buyerAddress}</div>}{o.sellerMapLink && o.shippingType === "pickup" && <div style={{ fontSize: 12, marginTop: 6 }}>Link lokasi toko: <button type="button" className="btn-primary btn-sm" onClick={() => window.open(o.sellerMapLink, "_blank")} style={{ marginLeft: 6 }}>Buka Maps Toko</button><br/><b>Siapkan pesanannya dan lakukan konfirmasi setelah pembeli datang.</b></div>}{o.buyerMapsLink && <div style={{ fontSize: 12, marginTop: 6 }}>Maps pembeli: <button type="button" className="btn-primary btn-sm" onClick={() => window.open(o.buyerMapsLink, "_blank")} style={{ marginLeft: 6 }}>Buka Maps Pembeli</button></div>}{(o.buyerVillage || o.buyerDistrict || o.buyerRegency) && <div style={{ fontSize: 12, marginTop: 6 }}>Alamat ongkir: {o.buyerVillage}, {o.buyerDistrict}, {o.buyerRegency} <button type="button" className="btn-primary btn-sm" onClick={() => window.open("https://rajaongkir.com/cek-ongkir", "_blank")} style={{ marginLeft: 8 }}>Cek Ongkir</button></div>}</div></div>{o.paymentProofUrl && <div style={{ marginTop: 10 }}><img src={o.paymentProofUrl} alt="Bukti" style={{ width: 160, height: 100, objectFit: "cover", borderRadius: 8 }} /></div>}{needQuote && <div style={{ marginTop: 12, padding: 12, background: "#FFF8E1", borderRadius: 8 }}><div style={{ fontWeight: 700, marginBottom: 8 }}>{o.shippingType === "same_day" ? "Isi Ongkir Same Day" : "Isi Ongkir Ekspedisi"}</div>{o.shippingType !== "same_day" && <button type="button" className="btn-primary btn-sm" style={{ marginBottom: 8 }} onClick={() => window.open("https://rajaongkir.com/cek-ongkir", "_blank")}>Cek Ongkir</button>}<div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}><input className="form-input" style={{ maxWidth: 220 }} placeholder="Harga ongkir, contoh 15000" value={quoteForm[o.id] || ""} onChange={(e) => setQuoteForm({ ...quoteForm, [o.id]: Number(e.target.value.replace(/\D/g, "") || 0).toLocaleString("id-ID") })} /><button className="btn-primary btn-sm" onClick={() => quoteShipping(o)}>Kirim Ongkir</button></div></div>}<div style={{ marginTop: 12, display: "flex", gap: 8, flexWrap: "wrap" }}>{!needQuote && o.statusPesanan === "pesanan_masuk" && <button className="btn-primary btn-sm" onClick={() => processOrder(o)}>🔄 Proses</button>}{o.statusPesanan === "diproses" && <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}><input className="form-input" style={{ maxWidth: 180 }} placeholder="Nama ekspedisi" value={shipForm[o.id]?.expeditionName || ""} onChange={(e) => setShipForm({ ...shipForm, [o.id]: { ...(shipForm[o.id] || {}), expeditionName: e.target.value } })} /><input className="form-input" style={{ maxWidth: 180 }} placeholder="Nomor resi" value={shipForm[o.id]?.trackingNumber || ""} onChange={(e) => setShipForm({ ...shipForm, [o.id]: { ...(shipForm[o.id] || {}), trackingNumber: e.target.value } })} /><button className="btn-primary btn-sm" style={{ background: "#3B82F6" }} onClick={() => sendTracking(o)}>🚚 Kirim Resi</button></div>}</div></div>; })}</div>
+    <div>
+      <div style={{ fontSize: 18, fontWeight: 700, marginBottom: 20 }}>🛒 Pesanan Masuk ({sortedOrders.length})</div>
+      {sortedOrders.length === 0 ? (
+        <div className="empty-state"><div className="empty-icon">🛒</div><p>Belum ada pesanan masuk</p></div>
+      ) : sortedOrders.map((o) => {
+        const s = statusLabel(o.statusPesanan);
+        const needQuote = o.statusPembayaran === "menunggu_ongkir" || o.pendingShippingQuote;
+        return (
+          <div key={o.id} className="card" style={{ marginBottom: 14 }}>
+            <div style={{ display: "flex", gap: 14, alignItems: "flex-start", flexWrap: "wrap" }}>
+              <img src={o.productImage || "https://via.placeholder.com/72?text=No"} alt={o.productName} style={{ width: 72, height: 72, borderRadius: 10, objectFit: "cover", flexShrink: 0 }} />
+              <div style={{ flex: 1 }}>
+                <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 6, flexWrap: "wrap" }}>
+                  <span style={{ fontWeight: 700, fontSize: 15 }}>{o.productName}</span>
+                  <span className={`badge ${s.cls}`}>{s.label}</span>
+                </div>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(140px, 1fr))", gap: "4px 16px", fontSize: 13, color: "var(--text2)" }}>
+                  <span>Pembeli: {o.buyerName}</span>
+                  <span>WA: {o.buyerWhatsapp}</span>
+                  <span>Qty: {o.quantity}</span>
+                  <span>Subtotal: {rupiah(o.productTotal)}</span>
+                  <span>Ongkir: {rupiah(o.shippingCost)}</span>
+                  <span>Total Bayar: <b style={{ color: "var(--orange)" }}>{rupiah(o.totalAmount)}</b></span>
+                  <span>Kurir: {o.courierName}</span>
+                  <span>Saldo bersih: <b style={{ color: "#10B981" }}>{rupiah(o.sellerAmount)}</b></span>
+                </div>
+                {o.buyerAddress && <div style={{ fontSize: 12, color: "var(--text3)", marginTop: 4 }}>📍 {o.buyerAddress}</div>}
+                {isPickup(o) && o.sellerMapLink && <div style={{ fontSize: 12, marginTop: 6 }}>Link lokasi toko: <button type="button" className="btn-primary btn-sm" onClick={() => window.open(o.sellerMapLink, "_blank")} style={{ marginLeft: 6 }}>Buka Maps Toko</button><br/><b>Siapkan pesanannya dan lakukan konfirmasi setelah pembeli datang.</b></div>}
+                {isSameDay(o) && o.buyerMapsLink && <div style={{ fontSize: 12, marginTop: 6 }}>Maps pembeli: <button type="button" className="btn-primary btn-sm" onClick={() => window.open(o.buyerMapsLink, "_blank")} style={{ marginLeft: 6 }}>Buka Maps Pembeli</button></div>}
+                {isExpedition(o) && (o.buyerVillage || o.buyerDistrict || o.buyerRegency) && <div style={{ fontSize: 12, marginTop: 6 }}>Alamat ongkir: {o.buyerVillage}, {o.buyerDistrict}, {o.buyerRegency} <button type="button" className="btn-primary btn-sm" onClick={() => window.open("https://rajaongkir.com/cek-ongkir", "_blank")} style={{ marginLeft: 8 }}>Cek Ongkir</button></div>}
+              </div>
+            </div>
+
+            {o.paymentProofUrl && <div style={{ marginTop: 10 }}><img src={o.paymentProofUrl} alt="Bukti" style={{ width: 160, height: 100, objectFit: "cover", borderRadius: 8 }} /></div>}
+
+            {needQuote && !isPickup(o) && (
+              <div style={{ marginTop: 12, padding: 12, background: "#FFF8E1", borderRadius: 8 }}>
+                <div style={{ fontWeight: 700, marginBottom: 8 }}>{isSameDay(o) ? "Isi Ongkir Same Day" : "Isi Ongkir Ekspedisi"}</div>
+                {isExpedition(o) && <button type="button" className="btn-primary btn-sm" style={{ marginBottom: 8 }} onClick={() => window.open("https://rajaongkir.com/cek-ongkir", "_blank")}>Cek Ongkir</button>}
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                  <input className="form-input" style={{ maxWidth: 220 }} placeholder="Harga ongkir, contoh 15000" value={quoteForm[o.id] || ""} onChange={(e) => setQuoteForm({ ...quoteForm, [o.id]: Number(e.target.value.replace(/\D/g, "") || 0).toLocaleString("id-ID") })} />
+                  <button className="btn-primary btn-sm" onClick={() => quoteShipping(o)}>Kirim Ongkir</button>
+                </div>
+              </div>
+            )}
+
+            <div style={{ marginTop: 12, display: "flex", gap: 8, flexWrap: "wrap" }}>
+              {!needQuote && isPickup(o) && o.statusPesanan === "pesanan_masuk" && (
+                <div style={{ width: "100%" }}>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: "var(--orange)", marginBottom: 8 }}>Konfirmasi ketika pembeli sudah datang dan mengambil pesanan.</div>
+                  <button className="btn-primary btn-sm" onClick={() => confirmPickup(o)}>✅ Konfirmasi Pembeli Datang</button>
+                </div>
+              )}
+
+              {!needQuote && !isPickup(o) && o.statusPesanan === "pesanan_masuk" && (
+                <button className="btn-primary btn-sm" onClick={() => processOrder(o)}>🔄 Proses</button>
+              )}
+
+              {isSameDay(o) && o.statusPesanan === "diproses" && (
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+                  {o.buyerMapsLink && <button type="button" className="btn-ghost btn-sm" onClick={() => window.open(o.buyerMapsLink, "_blank")}>Buka Maps Pembeli</button>}
+                  <button className="btn-primary btn-sm" style={{ background: "#3B82F6" }} onClick={() => sendSameDay(o)}>🚚 Kirim</button>
+                </div>
+              )}
+
+              {isExpedition(o) && o.statusPesanan === "diproses" && (
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+                  <input className="form-input" style={{ maxWidth: 180 }} placeholder="Nama ekspedisi" value={shipForm[o.id]?.expeditionName || ""} onChange={(e) => setShipForm({ ...shipForm, [o.id]: { ...(shipForm[o.id] || {}), expeditionName: e.target.value } })} />
+                  <input className="form-input" style={{ maxWidth: 180 }} placeholder="Nomor resi" value={shipForm[o.id]?.trackingNumber || ""} onChange={(e) => setShipForm({ ...shipForm, [o.id]: { ...(shipForm[o.id] || {}), trackingNumber: e.target.value } })} />
+                  <button className="btn-primary btn-sm" style={{ background: "#3B82F6" }} onClick={() => sendTracking(o)}>🚚 Kirim Resi</button>
+                </div>
+              )}
+            </div>
+          </div>
+        );
+      })}
+    </div>
   );
 }
 
@@ -1552,20 +1710,17 @@ function Withdraw({ user, profile, wallet, createNotif }) {
 }
 
 /* ─── ADMIN DASHBOARD ────────────────────────── */
-function AdminDashboard({ profile = {}, products = [], orders = [], withdrawals = [], paymentSetting = null, manualBalance = null, wallets = [], createNotif, onLogout }) {
+function AdminDashboard({ profile, products, orders, withdrawals, paymentSetting, manualBalance, wallets, users, createNotif, onLogout }) {
   const [tab, setTab] = useState("order");
-  const safeProducts = Array.isArray(products) ? products : [];
-  const safeOrders = Array.isArray(orders) ? orders : [];
-  const safeWithdrawals = Array.isArray(withdrawals) ? withdrawals : [];
-  const safeWallets = Array.isArray(wallets) ? wallets : [];
-  const autoBalance = safeWallets.reduce((sum, w) => sum + Number(w?.saldoTersedia || 0), 0);
+  const autoBalance = wallets.reduce((sum, w) => sum + Number(w.saldoTersedia || 0), 0);
   const displayedBalance = manualBalance?.isManualBalanceActive ? Number(manualBalance.totalSellerBalanceManual || 0) : autoBalance;
 
-  const isAdmin = profile?.role === "admin";
+  const isAdmin = profile.role === "admin";
   const tabs = [
     { id: "order", label: "Order Masuk", icon: "🛒" },
     ...(isAdmin ? [
       { id: "produk", label: "Kelola Produk", icon: "📦" },
+      { id: "users", label: "Kelola Akun", icon: "👥" },
       { id: "withdraw", label: "Penarikan", icon: "💰" },
       { id: "payment", label: "Rekening", icon: "💳" },
       { id: "balance", label: "Saldo Manual", icon: "⚙️" },
@@ -1599,9 +1754,9 @@ function AdminDashboard({ profile = {}, products = [], orders = [], withdrawals 
       <div className="dash-content">
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 14, marginBottom: 24 }}>
           {[
-            { label: "Total Produk", value: safeProducts.length, icon: "📦", color: "#EE4D2D" },
-            { label: "Total Order", value: safeOrders.length, icon: "🛒", color: "#3B82F6" },
-            { label: "Penarikan", value: safeWithdrawals.length, icon: "💸", color: "#F59E0B" },
+            { label: "Total Produk", value: products.length, icon: "📦", color: "#EE4D2D" },
+            { label: "Total Order", value: orders.length, icon: "🛒", color: "#3B82F6" },
+            { label: "Penarikan", value: withdrawals.length, icon: "💸", color: "#F59E0B" },
             { label: "Saldo Seller", value: rupiah(displayedBalance), icon: "💰", color: "#10B981" },
           ].map((s) => (
             <div key={s.label} className="stat-card">
@@ -1611,9 +1766,10 @@ function AdminDashboard({ profile = {}, products = [], orders = [], withdrawals 
             </div>
           ))}
         </div>
-        {tab === "order" && <AdminOrders orders={safeOrders} createNotif={createNotif} />}
-        {tab === "produk" && isAdmin && <AdminProducts products={safeProducts} />}
-        {tab === "withdraw" && isAdmin && <AdminWithdraw withdrawals={safeWithdrawals} />}
+        {tab === "order" && <AdminOrders orders={orders} createNotif={createNotif} />}
+        {tab === "produk" && isAdmin && <AdminProducts products={products} />}
+        {tab === "users" && isAdmin && <AdminUsers users={users} products={products} />}
+        {tab === "withdraw" && isAdmin && <AdminWithdraw withdrawals={withdrawals} />}
         {tab === "payment" && isAdmin && <PaymentSetting paymentSetting={paymentSetting} />}
         {tab === "balance" && isAdmin && <ManualBalance />}
         {tab === "admins" && isAdmin && <CreateSubAdmin />}
@@ -1622,10 +1778,106 @@ function AdminDashboard({ profile = {}, products = [], orders = [], withdrawals 
   );
 }
 
-function AdminProducts({ products = [] }) {
-  products = Array.isArray(products) ? products : [];
+
+function AdminUsers({ users = [], products = [] }) {
   const [filter, setFilter] = useState("all");
-  const filtered = filter === "all" ? products : products.filter((p) => p?.status === filter);
+  const visibleUsers = users
+    .filter((u) => u.role === "buyer" || u.role === "seller" || u.role === "deleted")
+    .filter((u) => filter === "all" ? true : u.role === filter)
+    .sort((a, b) => getMillis(b.createdAt) - getMillis(a.createdAt));
+
+  async function approveSeller(u) {
+    if (u.role !== "seller") return;
+    await updateDoc(doc(db, "users", u.uid || u.id), {
+      status: "active",
+      approvedAt: serverTimestamp(),
+    });
+    await setDoc(doc(db, "seller_wallets", u.uid || u.id), {
+      sellerId: u.uid || u.id,
+      sellerName: u.name || u.email || "Seller",
+      saldoTersedia: 0,
+      saldoTertahan: 0,
+      totalPenjualan: 0,
+      totalDitarik: 0,
+    }, { merge: true });
+    await addDoc(collection(db, "notifications"), {
+      role: "seller",
+      userId: u.uid || u.id,
+      type: "seller_approved",
+      title: "Akun Seller Disetujui ✅",
+      message: "Akun seller kamu sudah disetujui admin. Sekarang kamu bisa upload produk.",
+      isRead: false,
+      createdAt: serverTimestamp(),
+    });
+    alert("Akun seller berhasil disetujui. Seller sekarang bisa upload produk.");
+  }
+
+  async function deleteAccount(u) {
+    if (u.role !== "buyer" && u.role !== "seller") {
+      alert("Hanya akun buyer atau seller yang bisa dihapus dari menu ini.");
+      return;
+    }
+    if (!confirm(`Hapus akun ${u.name || u.email}? Akun akan dinonaktifkan dari dashboard.`)) return;
+    await updateDoc(doc(db, "users", u.uid || u.id), {
+      status: "deleted",
+      previousRole: u.role,
+      role: "deleted",
+      isDeleted: true,
+      deletedAt: serverTimestamp(),
+    });
+    if (u.role === "seller") {
+      const snap = await getDocs(query(collection(db, "products"), where("sellerId", "==", u.uid || u.id)));
+      await Promise.all(snap.docs.map((d) => updateDoc(doc(db, "products", d.id), { isDeleted: true, updatedAt: serverTimestamp() })));
+    }
+    alert("Akun berhasil dinonaktifkan. Jika ini akun seller, produk seller juga disembunyikan.");
+  }
+
+  return (
+    <div>
+      <div style={{ fontSize: 18, fontWeight: 700, marginBottom: 16 }}>👥 Kelola Akun Buyer & Seller</div>
+      <div style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap" }}>
+        {["all", "buyer", "seller", "deleted"].map((s) => (
+          <button key={s} onClick={() => setFilter(s)}
+            style={{ padding: "6px 14px", borderRadius: 100, fontSize: 12, border: "1.5px solid", cursor: "pointer",
+              borderColor: filter === s ? "var(--orange)" : "var(--border)",
+              background: filter === s ? "var(--orange-light)" : "#fff",
+              color: filter === s ? "var(--orange)" : "var(--text2)" }}>
+            {s === "all" ? "Semua" : s === "buyer" ? "Buyer" : s === "seller" ? "Seller" : "Terhapus"}
+          </button>
+        ))}
+      </div>
+      <div style={{ overflow: "auto" }}>
+        <table className="table">
+          <thead><tr><th>Nama</th><th>Email</th><th>Role</th><th>Status</th><th>Aksi</th></tr></thead>
+          <tbody>
+            {visibleUsers.map((u) => (
+              <tr key={u.uid || u.id}>
+                <td style={{ fontWeight: 600 }}>{u.name || "-"}</td>
+                <td style={{ fontSize: 13 }}>{u.email || "-"}</td>
+                <td><span className="badge badge-info">{u.previousRole && u.role === "deleted" ? u.previousRole : u.role}</span></td>
+                <td style={{ fontSize: 13 }}>{u.status || "active"}</td>
+                <td>
+                  {u.role === "buyer" || u.role === "seller" ? (
+                    <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                      {u.role === "seller" && u.status !== "active" && u.status !== "approved" && (
+                        <button className="btn-primary btn-sm" onClick={() => approveSeller(u)}>Approve Seller</button>
+                      )}
+                      <button className="btn-ghost btn-sm" style={{ color: "#EF4444", borderColor: "#EF4444" }} onClick={() => deleteAccount(u)}>Hapus Akun</button>
+                    </div>
+                  ) : <span style={{ fontSize: 12, color: "var(--text3)" }}>Tidak ada aksi</span>}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function AdminProducts({ products }) {
+  const [filter, setFilter] = useState("all");
+  const filtered = filter === "all" ? products : products.filter((p) => p.status === filter);
 
   async function approve(id) { await updateDoc(doc(db, "products", id), { status: "active" }); alert("Produk disetujui"); }
   async function reject(id) { await updateDoc(doc(db, "products", id), { status: "rejected" }); alert("Produk ditolak"); }
@@ -1662,13 +1914,13 @@ function AdminProducts({ products = [] }) {
                 <tr key={p.id}>
                   <td>
                     <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
-                      <img src={p?.imageUrl || "https://via.placeholder.com/44?text=No"} alt={p?.productName || "Produk"} style={{ width: 44, height: 44, borderRadius: 6, objectFit: "cover" }} />
-                      <span style={{ fontWeight: 500, fontSize: 13 }}>{p?.productName || "Tanpa Nama"}</span>
+                      <img src={p.imageUrl || ""} alt={p.productName} style={{ width: 44, height: 44, borderRadius: 6, objectFit: "cover" }} />
+                      <span style={{ fontWeight: 500, fontSize: 13 }}>{p.productName}</span>
                     </div>
                   </td>
-                  <td style={{ fontSize: 13 }}>{p?.sellerName || "-"}</td>
-                  <td style={{ color: "var(--orange)", fontWeight: 600 }}>{rupiah(p?.price || 0)}</td>
-                  <td style={{ fontSize: 12 }}>{p?.commissionType === "percent" ? `${p?.commissionValue || 0}%` : rupiah(p?.commissionValue || 0)}</td>
+                  <td style={{ fontSize: 13 }}>{p.sellerName}</td>
+                  <td style={{ color: "var(--orange)", fontWeight: 600 }}>{rupiah(p.price)}</td>
+                  <td style={{ fontSize: 12 }}>{p.commissionType === "percent" ? `${p.commissionValue}%` : rupiah(p.commissionValue)}</td>
                   <td><span className={`badge ${s.cls}`}>{s.label}</span></td>
                   <td>
                     <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
@@ -1687,8 +1939,7 @@ function AdminProducts({ products = [] }) {
   );
 }
 
-function AdminOrders({ orders = [], createNotif }) {
-  orders = Array.isArray(orders) ? orders : [];
+function AdminOrders({ orders, createNotif }) {
   const [filter, setFilter] = useState("all");
   const sortedOrders = sortNewest(orders);
   const filtered = filter === "all" ? sortedOrders : sortedOrders.filter((o) => o.statusPembayaran === filter || o.statusPesanan === filter);
@@ -1708,12 +1959,6 @@ function AdminOrders({ orders = [], createNotif }) {
     alert("Pembayaran ditolak");
   }
 
-  async function confirmPickup(o) {
-    await updateDoc(doc(db, "orders", o.id), { statusPesanan: "selesai", pickupConfirmedAt: serverTimestamp(), updatedAt: serverTimestamp() });
-    await createNotif({ role: "buyer", userId: o.buyerId, type: "pickup_confirmed", title: "Pesanan Diambil", message: `Pesanan ${o.productName} sudah dikonfirmasi. Silakan beri ulasan bintang dan komentar.`, orderId: o.id });
-    await createNotif({ role: "seller", userId: o.sellerId, type: "pickup_confirmed", title: "Ambil di Tempat Dikonfirmasi", message: `Pesanan ${o.productName} sudah dikonfirmasi admin.`, orderId: o.id });
-    alert("Pesanan ambil di tempat dikonfirmasi");
-  }
 
   return (
     <div>
@@ -1773,10 +2018,8 @@ function AdminOrders({ orders = [], createNotif }) {
                 <button className="btn-ghost btn-sm" style={{ color: "#EF4444", borderColor: "#EF4444" }} onClick={() => reject(o)}>✕ Tolak</button>
               </div>
             )}
-            {o.shippingType === "pickup" && !o.pickupConfirmedAt && o.statusPesanan !== "selesai" && (
-              <div style={{ marginTop: 12 }}>
-                <button className="btn-primary btn-sm" onClick={() => confirmPickup(o)}>✅ Konfirmasi Pembeli Sudah Datang</button>
-              </div>
+            {o.shippingType === "pickup" && o.statusPesanan !== "selesai" && (
+              <div style={{ marginTop: 12, fontSize: 12, color: "var(--text3)" }}>Konfirmasi ambil di tempat dilakukan oleh seller setelah pembeli datang.</div>
             )}
           </div>
         );
@@ -1785,8 +2028,7 @@ function AdminOrders({ orders = [], createNotif }) {
   );
 }
 
-function AdminWithdraw({ withdrawals = [] }) {
-  withdrawals = Array.isArray(withdrawals) ? withdrawals : [];
+function AdminWithdraw({ withdrawals }) {
   const [filter, setFilter] = useState("all");
   const filtered = filter === "all" ? withdrawals : withdrawals.filter((w) => w.status === filter);
 
