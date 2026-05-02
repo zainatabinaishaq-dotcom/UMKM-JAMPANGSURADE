@@ -21,7 +21,6 @@ import {
   setDoc,
   updateDoc,
   where,
-  writeBatch,
 } from "firebase/firestore";
 import { auth, db } from "./services/firebase";
 import { uploadImageToCloudinary } from "./services/cloudinary";
@@ -29,6 +28,8 @@ import "./index.css";
 
 const complaintEmail = "umkmdigitalecommerce@gmail.com";
 const rupiah = (n) => `Rp${Number(n || 0).toLocaleString("id-ID")}`;
+const formatRating = (value) => Number(value || 0).toFixed(1);
+const isApprovedStatus = (status) => status === "approved" || status === "active";
 
 
 function getMillis(value) {
@@ -58,52 +59,24 @@ function sortNewest(items) {
   });
 }
 
-const NOTIFICATION_SOUND_PATH = "/mixkit-happy-bells-notification-937.wav";
-let notificationAudio = null;
-let notificationAudioUnlocked = false;
-let lastNotificationSoundAt = 0;
-
-function getNotificationAudio() {
-  if (typeof window === "undefined") return null;
-  if (!notificationAudio) {
-    notificationAudio = new Audio(NOTIFICATION_SOUND_PATH);
-    notificationAudio.preload = "auto";
-    notificationAudio.volume = 0.75;
-  }
-  return notificationAudio;
-}
-
-function unlockNotificationSound() {
-  try {
-    const audio = getNotificationAudio();
-    if (!audio) return;
-    audio.muted = true;
-    audio.play()
-      .then(() => {
-        audio.pause();
-        audio.currentTime = 0;
-        audio.muted = false;
-        notificationAudioUnlocked = true;
-      })
-      .catch(() => {
-        audio.muted = false;
-        notificationAudioUnlocked = true;
-      });
-  } catch (error) {
-    notificationAudioUnlocked = true;
-  }
-}
-
 function playOrderSound() {
   try {
-    if (!notificationAudioUnlocked) return;
-    const now = Date.now();
-    if (now - lastNotificationSoundAt < 1500) return;
-    lastNotificationSoundAt = now;
-    const audio = getNotificationAudio();
-    if (!audio) return;
-    audio.currentTime = 0;
-    audio.play().catch(() => {});
+    const AudioContext = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContext) return;
+    const ctx = new AudioContext();
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = "sine";
+    osc.frequency.setValueAtTime(880, ctx.currentTime);
+    osc.frequency.setValueAtTime(660, ctx.currentTime + 0.12);
+    gain.gain.setValueAtTime(0.001, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.22, ctx.currentTime + 0.02);
+    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.35);
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.start();
+    osc.stop(ctx.currentTime + 0.36);
+    setTimeout(() => ctx.close?.(), 600);
   } catch (error) {
     // Browser can block autoplay before user interaction. Ignore safely.
   }
@@ -113,121 +86,6 @@ function calcCommission(total, type, value) {
   if (type === "percent") return Math.round(total * (Number(value || 0) / 100));
   if (type === "fixed") return Number(value || 0);
   return 0;
-}
-
-
-const OPEN_COMMISSION_STATUSES = ["pending", "partial", "cancelled", "menunggu_approval"];
-function isOpenCommissionBill(bill) {
-  return OPEN_COMMISSION_STATUSES.includes(bill?.status) && Number(bill?.remaining || bill?.amount || 0) > 0;
-}
-function sumCommissionDebt(bills = []) {
-  return bills.filter(isOpenCommissionBill).reduce((sum, bill) => sum + Number(bill.remaining || bill.amount || 0), 0);
-}
-
-async function autoDeductCommissionBills(sellerId, createNotif) {
-  if (!sellerId) return;
-  const walletRef = doc(db, "seller_wallets", sellerId);
-  const walletSnap = await getDoc(walletRef);
-  let saldo = Number(walletSnap.data()?.saldoTersedia || 0);
-  if (saldo <= 0) return;
-
-  const billsSnap = await getDocs(query(collection(db, "komisi_tagihan"), where("sellerId", "==", sellerId)));
-  const bills = billsSnap.docs
-    .map((d) => ({ id: d.id, ...d.data() }))
-    .filter((b) => ["pending", "partial", "cancelled"].includes(b.status) && Number(b.remaining || b.amount || 0) > 0)
-    .sort((a, b) => getMillis(a.createdAt) - getMillis(b.createdAt));
-
-  for (const bill of bills) {
-    if (saldo <= 0) break;
-    const remaining = Number(bill.remaining || bill.amount || 0);
-    const deduct = Math.min(saldo, remaining);
-    const newRemaining = remaining - deduct;
-    saldo -= deduct;
-
-    const batch = writeBatch(db);
-    batch.update(walletRef, {
-      saldoTersedia: increment(-deduct),
-      updatedAt: serverTimestamp(),
-    });
-    batch.update(doc(db, "komisi_tagihan", bill.id), {
-      paidFromBalance: increment(deduct),
-      remaining: newRemaining,
-      status: newRemaining <= 0 ? "auto_paid" : "partial",
-      updatedAt: serverTimestamp(),
-    });
-    if (bill.orderId) {
-      batch.update(doc(db, "orders", bill.orderId), {
-        cashCommissionPaidFromBalance: increment(deduct),
-        cashCommissionRemaining: newRemaining,
-        cashCommissionStatus: newRemaining <= 0 ? "auto_paid" : "partial_paid",
-        updatedAt: serverTimestamp(),
-      });
-    }
-    batch.set(doc(collection(db, "wallet_transactions")), {
-      sellerId,
-      billId: bill.id,
-      orderId: bill.orderId || null,
-      type: "cash_commission_auto_deduct",
-      amount: deduct,
-      remaining: newRemaining,
-      note: "Komisi tunai dipotong otomatis dari saldo seller",
-      createdAt: serverTimestamp(),
-    });
-    await batch.commit();
-
-    if (newRemaining <= 0 && createNotif) {
-      await createNotif({
-        role: "seller",
-        userId: sellerId,
-        type: "commission_auto_paid",
-        title: "Komisi Tunai Lunas Otomatis",
-        message: `Tagihan komisi ${rupiah(remaining)} sudah lunas dipotong dari saldo.`,
-        orderId: bill.orderId || null,
-      });
-    }
-  }
-}
-
-async function createCashCommissionBill(orderId, orderData, createNotif) {
-  const existingSnap = await getDocs(query(collection(db, "komisi_tagihan"), where("orderId", "==", orderId)));
-  if (!existingSnap.empty) {
-    await autoDeductCommissionBills(orderData.sellerId, createNotif);
-    return;
-  }
-  const amount = Number(orderData.adminFee || 0);
-  if (!amount || amount <= 0 || !orderData.sellerId) return;
-  const billRef = doc(collection(db, "komisi_tagihan"));
-  await setDoc(billRef, {
-    sellerId: orderData.sellerId,
-    sellerName: orderData.sellerName || "",
-    orderId,
-    productName: orderData.productName || "",
-    amount,
-    remaining: amount,
-    paidFromBalance: 0,
-    status: "pending",
-    createdAt: serverTimestamp(),
-    updatedAt: serverTimestamp(),
-  });
-  await updateDoc(doc(db, "orders", orderId), {
-    cashCommissionAmount: amount,
-    cashCommissionPaidFromBalance: 0,
-    cashCommissionRemaining: amount,
-    cashCommissionStatus: "pending",
-    commissionBillId: billRef.id,
-    updatedAt: serverTimestamp(),
-  });
-  if (createNotif) {
-    await createNotif({
-      role: "seller",
-      userId: orderData.sellerId,
-      type: "commission_bill",
-      title: "Tagihan Komisi Tunai",
-      message: `Ada tagihan komisi ${rupiah(amount)} untuk ${orderData.productName}. Sistem akan memotong saldo otomatis jika saldo tersedia cukup.`,
-      orderId,
-    });
-  }
-  await autoDeductCommissionBills(orderData.sellerId, createNotif);
 }
 function calculateDistanceKm(lat1, lon1, lat2, lon2) {
   const R = 6371;
@@ -263,7 +121,7 @@ const CATEGORY_GROUPS = {
   "Kerajinan & UMKM": ["Handmade", "Kerajinan Kayu", "Kerajinan Bambu", "Kerajinan Kerang", "Souvenir"],
   "Oleh-Oleh": ["Oleh-Oleh Makanan", "Souvenir", "Produk Khas Daerah", "Hampers"],
   "Wisata & Jasa": ["Paket Wisata", "Sewa Perahu", "Guide Lokal", "Foto & Video", "Homestay"],
-  "Jasa Lokal": ["Service Elektronik", "Tukang Bangunan", "Jasa Antar", "Laundry", "Bersih-Bersih", "Jasa Pijat"],
+  "Jasa Lokal": ["Service Elektronik", "Tukang Bangunan", "Jasa Antar", "Laundry", "Bersih-Bersih"],
   "Lainnya": ["Produk Lainnya"],
 };
 
@@ -328,10 +186,7 @@ export default function App() {
   const [withdrawals, setWithdrawals] = useState([]);
   const [paymentSetting, setPaymentSetting] = useState(null);
   const [manualBalance, setManualBalance] = useState(null);
-  const [commissionSetting, setCommissionSetting] = useState(null);
   const [wallets, setWallets] = useState([]);
-  const [commissionBills, setCommissionBills] = useState([]);
-  const [allUsers, setAllUsers] = useState([]);
   const [loading, setLoading] = useState(true);
   const [cart, setCart] = useState([]);
   const [showCart, setShowCart] = useState(false);
@@ -340,41 +195,21 @@ export default function App() {
   const [showCheckout, setShowCheckout] = useState(false);
   const seenOrderIdsRef = useRef(new Set());
   const orderSoundReadyRef = useRef(false);
-  const seenNotificationIdsRef = useRef(new Set());
-  const notificationSoundReadyRef = useRef(false);
 
   async function createNotif(data) {
     await addDoc(collection(db, "notifications"), { ...data, isRead: false, createdAt: serverTimestamp() });
   }
 
   useEffect(() => {
-    const unlock = () => unlockNotificationSound();
-    window.addEventListener("click", unlock, { once: true });
-    window.addEventListener("touchstart", unlock, { once: true });
-    window.addEventListener("keydown", unlock, { once: true });
-    return () => {
-      window.removeEventListener("click", unlock);
-      window.removeEventListener("touchstart", unlock);
-      window.removeEventListener("keydown", unlock);
-    };
-  }, []);
-
-  useEffect(() => {
     const unsub = onAuthStateChanged(auth, async (u) => {
       setUser(u);
-      try {
-        if (u) {
-          const snap = await getDoc(doc(db, "users", u.uid));
-          setProfile(snap.exists() ? snap.data() : null);
-        } else {
-          setProfile(null);
-        }
-      } catch (error) {
-        console.error("Gagal memuat profil user:", error);
+      if (u) {
+        const snap = await getDoc(doc(db, "users", u.uid));
+        setProfile(snap.exists() ? snap.data() : null);
+      } else {
         setProfile(null);
-      } finally {
-        setLoading(false);
       }
+      setLoading(false);
     });
     return () => unsub();
   }, []);
@@ -382,6 +217,9 @@ export default function App() {
   useEffect(() => {
     const unsub = onSnapshot(collection(db, "products"), (snap) => {
       setProducts(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
+    }, (error) => {
+      console.error("Gagal memuat products:", error);
+      setProducts([]);
     });
     return () => unsub();
   }, []);
@@ -389,6 +227,9 @@ export default function App() {
   useEffect(() => {
     const unsub = onSnapshot(collection(db, "orders"), (snap) => {
       setOrders(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
+    }, (error) => {
+      console.error("Gagal memuat orders:", error);
+      setOrders([]);
     });
     return () => unsub();
   }, []);
@@ -396,6 +237,9 @@ export default function App() {
   useEffect(() => {
     const unsub = onSnapshot(collection(db, "withdrawals"), (snap) => {
       setWithdrawals(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
+    }, (error) => {
+      console.error("Gagal memuat withdrawals:", error);
+      setWithdrawals([]);
     });
     return () => unsub();
   }, []);
@@ -403,20 +247,9 @@ export default function App() {
   useEffect(() => {
     const unsub = onSnapshot(collection(db, "seller_wallets"), (snap) => {
       setWallets(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
-    });
-    return () => unsub();
-  }, []);
-
-  useEffect(() => {
-    const unsub = onSnapshot(collection(db, "komisi_tagihan"), (snap) => {
-      setCommissionBills(sortNewest(snap.docs.map((d) => ({ id: d.id, ...d.data() }))));
-    });
-    return () => unsub();
-  }, []);
-
-  useEffect(() => {
-    const unsub = onSnapshot(collection(db, "users"), (snap) => {
-      setAllUsers(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
+    }, (error) => {
+      console.error("Gagal memuat seller_wallets:", error);
+      setWallets([]);
     });
     return () => unsub();
   }, []);
@@ -436,30 +269,13 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    const unsub = onSnapshot(doc(db, "admin_settings", "commission"), (snap) => {
-      setCommissionSetting(snap.exists() ? snap.data() : { globalCommissionPercent: 10 });
-    });
-    return () => unsub();
-  }, []);
-
-  useEffect(() => {
     if (!profile || !user) return;
     const qNotif =
       profile.role === "admin" || profile.role === "sub_admin"
         ? query(collection(db, "notifications"), where("role", "==", "admin"))
         : query(collection(db, "notifications"), where("userId", "==", user.uid));
     const unsub = onSnapshot(qNotif, (snap) => {
-      const data = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
-      const currentIds = new Set(data.map((n) => n.id));
-      if (!notificationSoundReadyRef.current) {
-        seenNotificationIdsRef.current = currentIds;
-        notificationSoundReadyRef.current = true;
-      } else {
-        const hasNewNotification = data.some((n) => !seenNotificationIdsRef.current.has(n.id));
-        if (hasNewNotification) playOrderSound();
-        seenNotificationIdsRef.current = currentIds;
-      }
-      setNotifications(data);
+      setNotifications(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
     });
     return () => unsub();
   }, [profile, user]);
@@ -539,11 +355,6 @@ export default function App() {
               {user && (
                 <button className="nav-icon-btn" onClick={() => navGoTo("notif")}>
                   🔔{unreadNotif > 0 && <span className="badge-count">{unreadNotif}</span>}
-                </button>
-              )}
-              {user && (
-                <button className="nav-icon-btn" onClick={() => navGoTo("chat")} title="Chat">
-                  💬
                 </button>
               )}
               {!user ? (
@@ -693,19 +504,16 @@ export default function App() {
         <SellerDashboard user={user} profile={profile}
           products={products.filter((p) => p.sellerId === user.uid)}
           orders={orders.filter((o) => o.sellerId === user.uid)}
-          wallets={wallets} commissionBills={commissionBills} paymentSetting={paymentSetting} commissionSetting={commissionSetting} createNotif={createNotif}
+          wallets={wallets} createNotif={createNotif}
           onLogout={() => { signOut(auth); navGoTo("home"); }} />
       )}
       {page === "admin" && (profile?.role === "admin" || profile?.role === "sub_admin") && (
         <AdminDashboard profile={profile} products={products} orders={orders} withdrawals={withdrawals}
-          paymentSetting={paymentSetting} manualBalance={manualBalance} commissionSetting={commissionSetting} wallets={wallets} commissionBills={commissionBills} users={allUsers} createNotif={createNotif}
+          paymentSetting={paymentSetting} manualBalance={manualBalance} wallets={wallets} createNotif={createNotif}
           onLogout={() => { signOut(auth); navGoTo("home"); }} />
       )}
       {page === "notif" && user && (
         <NotificationPage notifications={notifications} />
-      )}
-      {page === "chat" && user && (
-        <ChatCenter user={user} profile={profile} createNotif={createNotif} />
       )}
 
       {/* FOOTER — hidden on mobile */}
@@ -758,9 +566,10 @@ export default function App() {
           </button>
         )}
         {user ? (
-          <button className={`bottom-nav-item ${page === "chat" ? "active" : ""}`} onClick={() => navGoTo("chat")}>
-            <span className="nav-icon">💬</span>
-            <span>Chat</span>
+          <button className={`bottom-nav-item ${page === "notif" ? "active" : ""}`} onClick={() => navGoTo("notif")} style={{ position: "relative" }}>
+            <span className="nav-icon">🔔</span>
+            {unreadNotif > 0 && <span className="nav-badge">{unreadNotif}</span>}
+            <span>Notifikasi</span>
           </button>
         ) : (
           <button className={`bottom-nav-item ${page === "login" ? "active" : ""}`} onClick={() => navGoTo("login")}>
@@ -902,7 +711,7 @@ function ProductCard({ product, onClick, onAddToCart, user }) {
         <div className="product-name">{product.productName}</div>
         <div className="product-price">{rupiah(product.price)}</div>
         <div className="product-meta">
-          <span>⭐ {(product.averageRating || 0).toFixed(1)}</span>
+          <span>⭐ {formatRating(product.averageRating)}</span>
           <span>·</span>
           <span>{product.totalReviews || 0} terjual</span>
         </div>
@@ -933,7 +742,7 @@ function ProductDetailModal({ product, onClose, onAddToCart, user, profile }) {
               <div style={{ fontSize: 18, fontWeight: 700, marginBottom: 8 }}>{product.productName}</div>
               <div style={{ fontSize: 24, fontWeight: 800, color: "var(--orange)", marginBottom: 12 }}>{rupiah(product.price)}</div>
               <div style={{ display: "flex", gap: 12, marginBottom: 12 }}>
-                <span style={{ fontSize: 13, color: "var(--text2)" }}>⭐ {(product.averageRating || 0).toFixed(1)}</span>
+                <span style={{ fontSize: 13, color: "var(--text2)" }}>⭐ {formatRating(product.averageRating)}</span>
                 <span style={{ fontSize: 13, color: "var(--text2)" }}>| {product.totalReviews || 0} terjual</span>
                 <span className={`badge ${statusLabel(product.status).cls}`}>{statusLabel(product.status).label}</span>
               </div>
@@ -953,12 +762,6 @@ function ProductDetailModal({ product, onClose, onAddToCart, user, profile }) {
                     onClick={() => { for (let i = 0; i < qty; i++) onAddToCart(product); }}>
                     🛒 Tambah ke Keranjang
                   </button>
-                  {profile?.role === "buyer" && product.sellerId && product.sellerId !== user?.uid && (
-                    <button className="btn-outline" style={{ flex: 1, justifyContent: "center" }}
-                      onClick={() => startChatWithSeller(product, user, profile)}>
-                      💬 Chat Seller
-                    </button>
-                  )}
                 </div>
               )}
             </div>
@@ -1032,17 +835,7 @@ function LoginPage({ setPage }) {
 }
 
 function RegisterPage({ setPage, createNotif }) {
-  const [form, setForm] = useState({
-    name: "",
-    whatsapp: "",
-    village: "",
-    district: "",
-    regency: "",
-    detailAddress: "",
-    email: "",
-    password: "",
-    role: "buyer",
-  });
+  const [form, setForm] = useState({ name: "", email: "", password: "", role: "buyer", whatsapp: "" });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
@@ -1050,32 +843,11 @@ function RegisterPage({ setPage, createNotif }) {
     e.preventDefault();
     setLoading(true); setError("");
     try {
-      const fullAddress = [form.detailAddress, form.village, form.district, form.regency].filter(Boolean).join(", ");
-      const savedShippingAddress = {
-        buyerAddress: form.detailAddress || "",
-        buyerVillage: form.village || "",
-        buyerDistrict: form.district || "",
-        buyerRegency: form.regency || "",
-        buyerFullAddress: fullAddress,
-        updatedAt: new Date().toISOString(),
-      };
       const res = await createUserWithEmailAndPassword(auth, form.email, form.password);
       await setDoc(doc(db, "users", res.user.uid), {
-        uid: res.user.uid,
-        name: form.name,
-        email: form.email,
-        role: form.role,
-        whatsapp: form.whatsapp,
-        village: form.village,
-        district: form.district,
-        regency: form.regency,
-        detailAddress: form.detailAddress,
-        fullAddress,
-        savedShippingAddress,
-        status: form.role === "seller" ? "pending" : "active",
-        createdAt: serverTimestamp(),
+        uid: res.user.uid, name: form.name, email: form.email, role: form.role,
+        whatsapp: form.whatsapp, status: form.role === "seller" ? "pending" : "active", createdAt: serverTimestamp(),
       });
-      try { localStorage.setItem(`umkm_last_shipping_address_${res.user.uid}`, JSON.stringify(savedShippingAddress)); } catch {}
       if (form.role === "seller") {
         await setDoc(doc(db, "seller_wallets", res.user.uid), {
           sellerId: res.user.uid, sellerName: form.name, saldoTersedia: 0, saldoTertahan: 0, totalPenjualan: 0, totalDitarik: 0,
@@ -1102,32 +874,50 @@ function RegisterPage({ setPage, createNotif }) {
           </div>
           {error && <div style={{ background: "#FEE8E8", color: "#EF4444", padding: "10px 14px", borderRadius: 8, marginBottom: 16, fontSize: 13 }}>{error}</div>}
           <form onSubmit={register} style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-            <div className="form-group"><label>Nama Lengkap</label><input className="form-input" placeholder="Nama lengkap Anda" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} required /></div>
-            <div className="form-group"><label>Nomor WhatsApp</label><input className="form-input" placeholder="08xxxxxxxxxx" value={form.whatsapp} onChange={(e) => setForm({ ...form, whatsapp: e.target.value })} required /></div>
-            <div className="form-group"><label>Desa</label><input className="form-input" placeholder="Nama desa/kelurahan" value={form.village} onChange={(e) => setForm({ ...form, village: e.target.value })} required /></div>
-            <div className="form-group"><label>Kecamatan</label><input className="form-input" placeholder="Nama kecamatan" value={form.district} onChange={(e) => setForm({ ...form, district: e.target.value })} required /></div>
-            <div className="form-group"><label>Kabupaten</label><input className="form-input" placeholder="Nama kabupaten/kota" value={form.regency} onChange={(e) => setForm({ ...form, regency: e.target.value })} required /></div>
-            <div className="form-group"><label>Detail Alamat</label><textarea className="form-input" rows={2} placeholder="Kampung/Jalan/RT/RW/patokan" value={form.detailAddress} onChange={(e) => setForm({ ...form, detailAddress: e.target.value })} required /></div>
-            <div className="form-group"><label>Email</label><input className="form-input" type="email" placeholder="contoh@email.com" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} required /></div>
-            <div className="form-group"><label>Password</label><input className="form-input" type="password" placeholder="Minimal 6 karakter" value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} required /></div>
+            <div className="form-group">
+              <label>Nama Lengkap</label>
+              <input className="form-input" placeholder="Nama lengkap Anda" onChange={(e) => setForm({ ...form, name: e.target.value })} required />
+            </div>
+            <div className="form-group">
+              <label>Nomor WhatsApp</label>
+              <input className="form-input" placeholder="08xxxxxxxxxx" onChange={(e) => setForm({ ...form, whatsapp: e.target.value })} required />
+            </div>
+            <div className="form-group">
+              <label>Email</label>
+              <input className="form-input" type="email" placeholder="contoh@email.com" onChange={(e) => setForm({ ...form, email: e.target.value })} required />
+            </div>
+            <div className="form-group">
+              <label>Password</label>
+              <input className="form-input" type="password" placeholder="Minimal 6 karakter" onChange={(e) => setForm({ ...form, password: e.target.value })} required />
+            </div>
             <div className="form-group">
               <label>Daftar sebagai</label>
-              <select className="form-input" value={form.role} onChange={(e) => setForm({ ...form, role: e.target.value })}>
+              <select className="form-input" onChange={(e) => setForm({ ...form, role: e.target.value })}>
                 <option value="buyer">Pembeli</option>
                 <option value="seller">Penjual (Seller)</option>
               </select>
             </div>
-            {form.role === "seller" && <div style={{ background: "#FFF8E1", border: "1px solid #F59E0B", borderRadius: 8, padding: "10px 14px", fontSize: 12, color: "#92400E" }}>⏳ Akun seller harus disetujui admin dulu sebelum bisa upload produk.</div>}
-            <button className="btn-primary" style={{ width: "100%", justifyContent: "center", padding: 13, fontSize: 15 }} disabled={loading}>{loading ? "Memproses..." : "Daftar Sekarang"}</button>
+            {form.role === "seller" && (
+              <div style={{ background: "#FFF8E1", border: "1px solid #F59E0B", borderRadius: 8, padding: "10px 14px", fontSize: 12, color: "#92400E" }}>
+                ✅ Akun seller bisa langsung upload produk.
+              </div>
+            )}
+            <button className="btn-primary" style={{ width: "100%", justifyContent: "center", padding: 13, fontSize: 15 }} disabled={loading}>
+              {loading ? "Memproses..." : "Daftar Sekarang"}
+            </button>
           </form>
           <div className="divider" />
-          <p style={{ textAlign: "center", fontSize: 13, color: "var(--text2)" }}>Sudah punya akun? <span style={{ color: "var(--orange)", fontWeight: 600, cursor: "pointer" }} onClick={() => setPage("login")}>Masuk</span></p>
+          <p style={{ textAlign: "center", fontSize: 13, color: "var(--text2)" }}>
+            Sudah punya akun?{" "}
+            <span style={{ color: "var(--orange)", fontWeight: 600, cursor: "pointer" }} onClick={() => setPage("login")}>Masuk</span>
+          </p>
         </div>
       </div>
     </div>
   );
 }
 
+/* ─── CHECKOUT MODAL ─────────────────────────── */
 function CheckoutModal({ cart, user, profile, onClose, onSuccess, createNotif }) {
   const savedAddress = (() => {
     try {
@@ -1140,13 +930,13 @@ function CheckoutModal({ cart, user, profile, onClose, onSuccess, createNotif })
   const [form, setForm] = useState({
     buyerName: profile?.name || "",
     buyerWhatsapp: profile?.whatsapp || "",
-    buyerAddress: savedAddress.buyerAddress || savedAddress.buyerFullAddress || profile?.detailAddress || profile?.fullAddress || "",
+    buyerAddress: savedAddress.buyerAddress || "",
     shippingType: "pickup",
     paymentMethod: "transfer",
     buyerMapsLink: savedAddress.buyerMapsLink || "",
-    buyerVillage: savedAddress.buyerVillage || profile?.village || "",
-    buyerDistrict: savedAddress.buyerDistrict || profile?.district || "",
-    buyerRegency: savedAddress.buyerRegency || profile?.regency || "",
+    buyerVillage: savedAddress.buyerVillage || "",
+    buyerDistrict: savedAddress.buyerDistrict || "",
+    buyerRegency: savedAddress.buyerRegency || "",
   });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -1185,7 +975,7 @@ function CheckoutModal({ cart, user, profile, onClose, onSuccess, createNotif })
         const totalAmount = productTotal + shippingCost;
         const sellerAmount = productTotal - adminFee + shippingCost;
         const ref = await addDoc(collection(db, "orders"), {
-          buyerId: user.uid, sellerId: item.sellerId, sellerName: item.sellerName || "", productId: item.id, productName: item.productName, productImage: item.imageUrl,
+          buyerId: user.uid, sellerId: item.sellerId, productId: item.id, productName: item.productName, productImage: item.imageUrl,
           buyerName: form.buyerName, buyerWhatsapp: form.buyerWhatsapp, buyerAddress: form.buyerAddress,
           buyerMapsLink: form.buyerMapsLink || "", buyerVillage: form.buyerVillage || "", buyerDistrict: form.buyerDistrict || "", buyerRegency: form.buyerRegency || "",
           sellerMapLink: item.sellerMapLink || "", sellerAddress: item.sellerAddress || "", quantity: item.quantity,
@@ -1193,9 +983,6 @@ function CheckoutModal({ cart, user, profile, onClose, onSuccess, createNotif })
           totalAmount, adminFee, sellerAmount, statusPembayaran, statusPesanan, proofSubmitted: false, reviewSubmitted: false,
           pendingShippingQuote: needsSellerQuote, showToSeller: true, createdAt: serverTimestamp(), updatedAt: serverTimestamp(),
         });
-        if (form.paymentMethod === "cash" && !needsSellerQuote) {
-          await createCashCommissionBill(ref.id, { sellerId: item.sellerId, sellerName: item.sellerName || "", productName: item.productName, adminFee }, createNotif);
-        }
         await createNotif({ role: "admin", type: "order_new", title: "Order Baru Masuk", message: `${form.buyerName} memesan ${item.productName} senilai ${rupiah(totalAmount)}`, orderId: ref.id });
         await createNotif({ role: "seller", userId: item.sellerId, type: needsSellerQuote ? "shipping_quote_needed" : "order_new", title: needsSellerQuote ? "Cek Ongkir Pesanan" : "Ada Pesanan Baru! 🎉", message: needsSellerQuote ? `Pembeli memilih ${courierName}. Input ongkir untuk ${item.productName}.` : `Pesanan baru: ${item.productName} (${item.quantity} pcs).`, orderId: ref.id });
         await createNotif({ role: "buyer", userId: user.uid, type: "order_placed", title: "Pesanan Berhasil Dibuat", message: needsSellerQuote ? `Pesanan ${item.productName} dibuat. Penjual sedang menghitung ongkir.` : `Pesanan ${item.productName} berhasil dibuat.`, orderId: ref.id });
@@ -1214,10 +1001,9 @@ function CheckoutModal({ cart, user, profile, onClose, onSuccess, createNotif })
         <div className="form-group"><label>Nama Penerima</label><input className="form-input" value={form.buyerName} onChange={(e) => setForm({ ...form, buyerName: e.target.value })} required /></div>
         <div className="form-group"><label>WhatsApp</label><input className="form-input" value={form.buyerWhatsapp} onChange={(e) => setForm({ ...form, buyerWhatsapp: e.target.value })} required /></div>
         <div className="form-group"><label>Alamat Lengkap</label><textarea className="form-input" rows={2} value={form.buyerAddress} onChange={(e) => setForm({ ...form, buyerAddress: e.target.value })} required /></div>
-        <div className="form-group"><label>Metode Pengiriman</label><select className="form-input" value={form.shippingType} onChange={(e) => { const nextShipping = e.target.value; setForm({ ...form, shippingType: nextShipping, paymentMethod: nextShipping === "pickup" ? "cash" : (["transfer","qris","cash"].includes(form.paymentMethod) ? (nextShipping === "same_day" ? form.paymentMethod : (form.paymentMethod === "cash" ? "transfer" : form.paymentMethod)) : "transfer") }); setShippingCheckRequested(false); }}><option value="pickup">Ambil di Tempat (Gratis)</option><option value="same_day">Same Day Lokal</option><option value="jne">JNE</option><option value="pos">POS</option><option value="tiki">TIKI</option><option value="jnt">J&T</option><option value="sicepat">SiCepat</option></select></div>
+        <div className="form-group"><label>Metode Pengiriman</label><select className="form-input" value={form.shippingType} onChange={(e) => { const nextShipping = e.target.value; setForm({ ...form, shippingType: nextShipping, paymentMethod: nextShipping === "pickup" ? "cash" : (nextShipping === "same_day" ? form.paymentMethod : "transfer") }); setShippingCheckRequested(false); }}><option value="pickup">Ambil di Tempat (Gratis)</option><option value="same_day">Same Day Lokal</option><option value="jne">JNE</option><option value="pos">POS</option><option value="tiki">TIKI</option><option value="jnt">J&T</option><option value="sicepat">SiCepat</option></select></div>
         {form.shippingType === "pickup" && <div className="form-group"><label>Metode Pembayaran</label><div className="form-input" style={{ background: "#f8fafc", color: "var(--text2)" }}>Tunai saat ambil barang</div><div style={{ fontSize: 12, color: "var(--text3)", marginTop: 6 }}>Tidak perlu upload bukti pembayaran. Setelah order, pembeli melihat link lokasi toko dan instruksi segera ambil pesanan.</div></div>}
-        {form.shippingType === "same_day" && <div className="form-group"><label>Metode Pembayaran Same Day</label><select className="form-input" value={form.paymentMethod} onChange={(e) => setForm({ ...form, paymentMethod: e.target.value })}><option value="transfer">Transfer Bank setelah ongkir keluar</option><option value="qris">Scan QRIS setelah ongkir keluar</option><option value="cash">Tunai saat barang diterima</option></select></div>}
-        {form.shippingType !== "pickup" && form.shippingType !== "same_day" && <div className="form-group"><label>Metode Pembayaran</label><select className="form-input" value={form.paymentMethod} onChange={(e) => setForm({ ...form, paymentMethod: e.target.value })}><option value="transfer">Transfer Bank setelah ongkir keluar</option><option value="qris">Scan QRIS setelah ongkir keluar</option></select></div>}
+        {form.shippingType === "same_day" && <div className="form-group"><label>Metode Pembayaran Same Day</label><select className="form-input" value={form.paymentMethod} onChange={(e) => setForm({ ...form, paymentMethod: e.target.value })}><option value="transfer">Transfer setelah ongkir keluar</option><option value="cash">Tunai saat barang diterima</option></select></div>}
         {form.shippingType === "same_day" && <div className="form-group"><label>Link Google Maps Lokasi Anda</label><input className="form-input" placeholder="Tempel link Google Maps alamat pengiriman" value={form.buyerMapsLink} onChange={(e) => { setForm({ ...form, buyerMapsLink: e.target.value }); setShippingCheckRequested(false); }} required /><button type="button" className="btn-primary btn-sm" style={{ marginTop: 10 }} onClick={() => { if (!form.buyerMapsLink.trim()) { setError("Tempel link Google Maps Anda dulu."); return; } setShippingCheckRequested(true); setError(""); }}>Cek Ongkir</button><div style={{ fontSize: 12, color: shippingCheckRequested ? "#10B981" : "var(--orange)", marginTop: 6 }}>{shippingCheckRequested ? "Penjual sedang menghitung ongkir. Klik Buat Pesanan untuk mengirim permintaan ke seller." : "Klik Cek Ongkir dulu. Setelah itu tombol Buat Pesanan aktif."}</div></div>}
         {needsAddress && <div style={{ background: "#FFF8E1", padding: 12, borderRadius: 8 }}><div style={{ fontWeight: 700, marginBottom: 8 }}>Alamat untuk cek ongkir</div><div style={{ fontSize: 12, color: "var(--text3)", marginBottom: 8 }}>Alamat ekspedisi akan otomatis disimpan ke profil dan terisi saat belanja berikutnya.</div><div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8 }}><input className="form-input" placeholder="Desa" value={form.buyerVillage} onChange={(e) => { setForm({ ...form, buyerVillage: e.target.value }); setShippingCheckRequested(false); }} required /><input className="form-input" placeholder="Kecamatan" value={form.buyerDistrict} onChange={(e) => { setForm({ ...form, buyerDistrict: e.target.value }); setShippingCheckRequested(false); }} required /><input className="form-input" placeholder="Kabupaten" value={form.buyerRegency} onChange={(e) => { setForm({ ...form, buyerRegency: e.target.value }); setShippingCheckRequested(false); }} required /></div><button type="button" className="btn-primary btn-sm" style={{ marginTop: 10 }} onClick={() => { if (!form.buyerVillage || !form.buyerDistrict || !form.buyerRegency) { setError("Isi desa, kecamatan, dan kabupaten dulu."); return; } setShippingCheckRequested(true); setError(""); }}>Cek Ongkir</button><div style={{ fontSize: 12, color: shippingCheckRequested ? "#10B981" : "var(--orange)", marginTop: 6 }}>{shippingCheckRequested ? "Permintaan cek ongkir siap dikirim ke seller. Klik Buat Pesanan." : "Klik Cek Ongkir dulu agar seller mendapat perintah cek ongkir."}</div></div>}
       </div><div className="modal-footer"><button type="button" className="btn-ghost" onClick={onClose}>Batal</button><button type="submit" className="btn-primary" disabled={loading || (needsSellerQuote && !shippingCheckRequested)}>{loading ? "Memproses..." : "Buat Pesanan"}</button></div></form>
@@ -1366,61 +1152,14 @@ function BuyerOrderCard({ order, createNotif, paymentSetting }) {
         <div style={{ flex: 1, minWidth: 180 }}>
           <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 6, flexWrap: "wrap" }}><span style={{ fontWeight: 700, fontSize: 15 }}>{order.productName}</span><span className={`badge ${s.cls}`}>{s.label}</span></div>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(140px, 1fr))", gap: "4px 16px", fontSize: 13, color: "var(--text2)" }}><span>Qty: {order.quantity}</span><span>Subtotal: {rupiah(order.productTotal)}</span><span>Ongkir: {rupiah(order.shippingCost)}</span><span>Total: <b style={{ color: "var(--orange)" }}>{rupiah(order.totalAmount)}</b></span><span>Kurir: {order.courierName}</span>{order.trackingNumber && <span>Resi: <b>{order.trackingNumber}</b></span>}</div>
-          {order.sellerMapLink && order.shippingType === "pickup" && <div style={{ marginTop: 8, fontSize: 13 }}><b>Link lokasi toko:</b> <button type="button" className="btn-primary btn-sm" style={{ marginLeft: 8 }} onClick={() => window.open(order.sellerMapLink, "_blank")}>Buka Maps Toko</button><div style={{ color: "var(--orange)", fontWeight: 700, marginTop: 6 }}>Segera ambil pesanan anda</div></div>}
-          
+          {order.sellerMapLink && order.shippingType === "pickup" && <div style={{ marginTop: 8, fontSize: 13 }}><b>Link lokasi toko:</b> <a href={order.sellerMapLink} target="_blank" rel="noreferrer">Buka Google Maps</a><div style={{ color: "var(--orange)", fontWeight: 700 }}>Segera ambil pesanan anda</div></div>}
+          {order.buyerMapsLink && <div style={{ marginTop: 8, fontSize: 13 }}><b>Link lokasi Anda:</b> <a href={order.buyerMapsLink} target="_blank" rel="noreferrer">Buka Maps</a></div>}
           {order.statusPembayaran === "menunggu_ongkir" && <div style={{ marginTop: 8, padding: 10, background: "#FFF8E1", borderRadius: 8, color: "#92400E", fontSize: 13 }}>Penjual sedang menghitung ongkir. Tombol pembayaran aktif setelah ongkir dikirim.</div>}
           {order.trackingNumber && <div style={{ marginTop: 8, display: "flex", gap: 8, flexWrap: "wrap" }}><button className="btn-ghost btn-sm" onClick={() => navigator.clipboard.writeText(order.trackingNumber)}>Salin Resi</button><a className="btn-primary btn-sm" href="https://parcelsapp.com/id" target="_blank" rel="noreferrer" style={{ textDecoration: "none" }}>Lacak Paket</a></div>}
         </div>
       </div>
       {order.paymentProofUrl && <div style={{ marginTop: 10 }}><img src={order.paymentProofUrl} alt="Bukti" style={{ width: 180, height: 120, objectFit: "cover", borderRadius: 8 }} /></div>}
-      {order.statusPesanan === "menunggu_pembayaran" &&
-        order.statusPembayaran !== "menunggu_ongkir" &&
-        !order.proofSubmitted &&
-        !order.paymentProofUrl &&
-        ["transfer", "qris"].includes(order.paymentMethod) &&
-        order.shippingType !== "pickup" && (
-        <div style={{ marginTop: 14, paddingTop: 14, borderTop: "1px solid var(--border)" }}>
-          {/* WAJIB URUT: INFO REKENING ADMIN → UPLOAD BUKTI → TOMBOL KIRIM BUKTI */}
-          {order.paymentMethod === "qris" ? (
-            <div style={{ background: "#FFF8E1", borderRadius: 10, padding: 14, marginBottom: 12, fontSize: 13, border: "1px solid #FDE68A" }}>
-              <div style={{ fontWeight: 800, marginBottom: 8, color: "#92400E" }}>📱 SCAN QRIS ADMIN</div>
-              {paymentSetting?.qrisUrl ? (
-                <img src={paymentSetting.qrisUrl} alt="QRIS Admin" style={{ width: 220, maxWidth: "100%", borderRadius: 12, border: "1px solid var(--border)", background: "#fff" }} />
-              ) : (
-                <div style={{ color: "#B91C1C", fontWeight: 700 }}>QRIS belum diatur admin</div>
-              )}
-              <div style={{ color: "var(--orange)", fontWeight: 800, marginTop: 8 }}>Jika sudah bayar kirimkan bukti pembayaran</div>
-            </div>
-          ) : (
-            <div style={{ background: "#FFF8E1", borderRadius: 10, padding: 14, marginBottom: 12, fontSize: 13, border: "1px solid #FDE68A" }}>
-              <div style={{ fontWeight: 800, marginBottom: 8, color: "#92400E" }}>💳 INFO REKENING ADMIN</div>
-              <div>Bank: <b>{paymentSetting?.bankName || "Belum diatur admin"}</b></div>
-              <div>No Rekening: <b>{paymentSetting?.accountNumber || "-"}</b></div>
-              <div>Atas Nama: <b>{paymentSetting?.accountHolder || "-"}</b></div>
-              <div style={{ color: "var(--orange)", fontWeight: 800, marginTop: 8 }}>Jika sudah bayar kirimkan bukti pembayaran</div>
-            </div>
-          )}
-
-          <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 8 }}>Upload Bukti Pembayaran</div>
-          <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-            <input
-              type="file"
-              accept="image/jpeg,image/png,image/webp"
-              onChange={(e) => {
-                if (e.target.files[0]?.size > 1024 * 1024) {
-                  alert("Maks 1MB");
-                  return;
-                }
-                setFile(e.target.files[0]);
-              }}
-              style={{ fontSize: 13, flex: 1 }}
-            />
-            <button className="btn-primary btn-sm" onClick={uploadProof} disabled={uploadLoading}>
-              {uploadLoading ? "Mengirim..." : "Kirim Bukti"}
-            </button>
-          </div>
-        </div>
-      )}
+      {order.statusPesanan === "menunggu_pembayaran" && order.statusPembayaran !== "menunggu_ongkir" && !order.proofSubmitted && !order.paymentProofUrl && order.paymentMethod === "transfer" && order.shippingType !== "pickup" && <div style={{ marginTop: 14, paddingTop: 14, borderTop: "1px solid var(--border)" }}><div style={{ background: "#FFF8E1", borderRadius: 8, padding: 12, marginBottom: 12, fontSize: 13 }}><div style={{ fontWeight: 700, marginBottom: 6 }}>Rekening Pembayaran</div><div>Bank: <b>{paymentSetting?.bankName || "Belum diatur admin"}</b></div><div>No Rekening: <b>{paymentSetting?.accountNumber || "-"}</b></div><div>Atas Nama: <b>{paymentSetting?.accountHolder || "-"}</b></div><div style={{ color: "var(--orange)", fontWeight: 700, marginTop: 6 }}>Jika sudah bayar kirimkan bukti pembayaran</div></div><div style={{ fontSize: 13, fontWeight: 600, marginBottom: 8 }}>Upload Bukti Pembayaran</div><div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}><input type="file" accept="image/jpeg,image/png,image/webp" onChange={(e) => { if (e.target.files[0]?.size > 1024*1024) { alert("Maks 1MB"); return; } setFile(e.target.files[0]); }} style={{ fontSize: 13, flex: 1 }} /><button className="btn-primary btn-sm" onClick={uploadProof} disabled={uploadLoading}>{uploadLoading ? "Mengirim..." : "Kirim Bukti"}</button></div></div>}
       <div style={{ marginTop: 12, display: "flex", gap: 10, flexWrap: "wrap" }}>{order.statusPesanan === "dikirim" && !order.receivedAt && <button className="btn-primary btn-sm" onClick={received}>✅ Sudah Sampai</button>}{order.statusPesanan === "selesai" && !order.reviewSubmitted && <button className="btn-outline btn-sm" onClick={() => setShowReview(!showReview)}>⭐ Beri Ulasan</button>}</div>
       {showReview && !order.reviewSubmitted && <div style={{ marginTop: 14, padding: 14, background: "var(--bg)", borderRadius: 8 }}><div style={{ fontWeight: 600, marginBottom: 8 }}>Beri Ulasan</div><div style={{ display: "flex", gap: 8, marginBottom: 10 }}>{[1,2,3,4,5].map((r) => <button key={r} onClick={() => setRating(r)} style={{ background: rating >= r ? "#F59E0B" : "#fff", border: "1.5px solid", borderColor: rating >= r ? "#F59E0B" : "var(--border)", padding: "4px 10px", borderRadius: 6, cursor: "pointer", fontWeight: 700 }}>⭐</button>)}</div><textarea className="form-input" rows={2} placeholder="Tulis komentar Anda..." value={comment} onChange={(e) => setComment(e.target.value)} style={{ marginBottom: 8 }} /><button className="btn-primary btn-sm" onClick={sendReview}>Kirim Ulasan</button></div>}
     </div>
@@ -1441,7 +1180,7 @@ function BuyerProfile({ profile }) {
           </div>
         </div>
         <div className="divider" />
-        {[["Email", profile?.email],["WhatsApp", profile?.whatsapp || "-"],["Status Akun", profile?.status === "active" ? "✅ Aktif" : profile?.status]].map(([l,v]) => (
+        {[["Email", profile?.email],["WhatsApp", profile?.whatsapp || "-"],["Status Akun", isApprovedStatus(profile?.status) ? "✅ Aktif" : profile?.status]].map(([l,v]) => (
           <div key={l} style={{ display: "flex", justifyContent: "space-between", padding: "10px 0", borderBottom: "1px solid var(--border)", fontSize: 14 }}>
             <span style={{ color: "var(--text2)" }}>{l}</span>
             <span style={{ fontWeight: 500 }}>{v}</span>
@@ -1453,18 +1192,15 @@ function BuyerProfile({ profile }) {
 }
 
 /* ─── SELLER DASHBOARD ───────────────────────── */
-function SellerDashboard({ user, profile, products, orders, wallets, commissionBills = [], paymentSetting, createNotif, onLogout }) {
+function SellerDashboard({ user, profile, products = [], orders = [], wallets = [], createNotif, onLogout }) {
   const [tab, setTab] = useState("beranda");
-  const wallet = wallets.find((w) => w.sellerId === user.uid);
-  const sellerCommissionBills = commissionBills.filter((b) => b.sellerId === user.uid);
-  const commissionDebt = sumCommissionDebt(sellerCommissionBills);
-  const hasCommissionDebt = commissionDebt > 0;
+  const sellerProducts = Array.isArray(products) ? products : [];
+  const sellerOrders = Array.isArray(orders) ? orders : [];
+  const wallet = (Array.isArray(wallets) ? wallets : []).find((w) => w?.sellerId === user?.uid);
   const tabs = [
     { id: "beranda", label: "Beranda", icon: "🏠" },
     { id: "produk", label: "Produk Saya", icon: "📦" },
-    { id: "tagihan", label: "Tagihan Komisi", icon: "💸" },
     { id: "order", label: "Pesanan Masuk", icon: "🛒" },
-    { id: "chat", label: "Chat Buyer", icon: "💬" },
     { id: "withdraw", label: "Penarikan Saldo", icon: "💰" },
     { id: "profil", label: "Profil Toko", icon: "🏪" },
   ];
@@ -1497,11 +1233,10 @@ function SellerDashboard({ user, profile, products, orders, wallets, commissionB
             <div style={{ fontSize: 20, fontWeight: 700, marginBottom: 20 }}>Dashboard Toko 🏪</div>
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 14, marginBottom: 28 }}>
               {[
-                { label: "Total Produk", value: products.length, icon: "📦", color: "#EE4D2D" },
-                { label: "Produk Aktif", value: products.filter((p) => p.status === "active").length, icon: "✅", color: "#10B981" },
-                { label: "Total Order", value: orders.length, icon: "🛒", color: "#3B82F6" },
+                { label: "Total Produk", value: sellerProducts.length, icon: "📦", color: "#EE4D2D" },
+                { label: "Produk Aktif", value: sellerProducts.filter((p) => p?.status === "active").length, icon: "✅", color: "#10B981" },
+                { label: "Total Order", value: sellerOrders.length, icon: "🛒", color: "#3B82F6" },
                 { label: "Saldo Tersedia", value: rupiah(wallet?.saldoTersedia || 0), icon: "💰", color: "#F59E0B" },
-                { label: "Tagihan Komisi", value: rupiah(commissionDebt), icon: "💸", color: commissionDebt > 0 ? "#EF4444" : "#10B981" },
                 { label: "Total Penjualan", value: rupiah(wallet?.totalPenjualan || 0), icon: "📈", color: "#8B5CF6" },
               ].map((s) => (
                 <div key={s.label} className="stat-card">
@@ -1514,49 +1249,41 @@ function SellerDashboard({ user, profile, products, orders, wallets, commissionB
             {profile?.status === "pending" && (
               <div style={{ background: "#FFF8E1", border: "1px solid #F59E0B", borderRadius: 10, padding: 16, marginBottom: 20 }}>
                 <div style={{ fontWeight: 700, color: "#92400E", marginBottom: 4 }}>⏳ Akun Menunggu Verifikasi</div>
-                <p style={{ fontSize: 13, color: "#78350F" }}>Akun seller Anda sedang dalam proses verifikasi oleh admin. Setelah admin menyetujui akun, fitur upload produk akan aktif.</p>
-              </div>
-            )}
-            {hasCommissionDebt && (
-              <div style={{ background: "#FEF2F2", border: "1px solid #FCA5A5", borderRadius: 10, padding: 16, marginBottom: 20 }}>
-                <div style={{ fontWeight: 800, color: "#B91C1C", marginBottom: 4 }}>💸 Tagihan Komisi Belum Lunas</div>
-                <p style={{ fontSize: 13, color: "#7F1D1D" }}>Total tagihan komisi: <b>{rupiah(commissionDebt)}</b>. Upload produk dan penarikan saldo diblokir sampai tagihan lunas atau saldo otomatis terpotong.</p>
+                <p style={{ fontSize: 13, color: "#78350F" }}>Akun seller Anda sedang dalam proses verifikasi oleh admin. Anda sudah bisa menambahkan produk, namun produk akan aktif setelah admin menyetujui.</p>
               </div>
             )}
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
               <div className="card">
                 <div style={{ fontWeight: 700, marginBottom: 12 }}>📊 Order Terbaru</div>
-                {sortNewest(orders).slice(0, 4).map((o) => (
+                {sortNewest(sellerOrders).slice(0, 4).map((o) => (
                   <div key={o.id} style={{ display: "flex", justifyContent: "space-between", padding: "8px 0", borderBottom: "1px solid var(--border)", fontSize: 13 }}>
                     <span style={{ color: "var(--text2)" }}>{o.productName}</span>
                     <span className={`badge ${statusLabel(o.statusPesanan).cls}`}>{statusLabel(o.statusPesanan).label}</span>
                   </div>
                 ))}
-                {orders.length === 0 && <p style={{ fontSize: 13, color: "var(--text3)" }}>Belum ada order</p>}
+                {sellerOrders.length === 0 && <p style={{ fontSize: 13, color: "var(--text3)" }}>Belum ada order</p>}
               </div>
               <div className="card">
                 <div style={{ fontWeight: 700, marginBottom: 12 }}>📦 Produk Terbaru</div>
-                {products.slice(0, 4).map((p) => (
+                {sellerProducts.slice(0, 4).map((p) => (
                   <div key={p.id} style={{ display: "flex", justifyContent: "space-between", padding: "8px 0", borderBottom: "1px solid var(--border)", fontSize: 13 }}>
                     <span style={{ color: "var(--text2)" }}>{p.productName}</span>
                     <span className={`badge ${statusLabel(p.status).cls}`}>{statusLabel(p.status).label}</span>
                   </div>
                 ))}
-                {products.length === 0 && <p style={{ fontSize: 13, color: "var(--text3)" }}>Belum ada produk</p>}
+                {sellerProducts.length === 0 && <p style={{ fontSize: 13, color: "var(--text3)" }}>Belum ada produk</p>}
               </div>
             </div>
           </div>
         )}
-        {tab === "produk" && <AddProduct user={user} profile={profile} products={products} hasCommissionDebt={hasCommissionDebt} commissionDebt={commissionDebt} commissionSetting={commissionSetting} createNotif={createNotif} />}
-        {tab === "tagihan" && <SellerCommissionBills bills={sellerCommissionBills} paymentSetting={paymentSetting} createNotif={createNotif} />}
-        {tab === "order" && <SellerOrders orders={orders} createNotif={createNotif} />}
-        {tab === "chat" && <ChatCenter user={user} profile={profile} createNotif={createNotif} />}
-        {tab === "withdraw" && <Withdraw user={user} profile={profile} wallet={wallet} hasCommissionDebt={hasCommissionDebt} commissionDebt={commissionDebt} createNotif={createNotif} />}
+        {tab === "produk" && <AddProduct user={user} profile={profile} products={sellerProducts} createNotif={createNotif} />}
+        {tab === "order" && <SellerOrders orders={sellerOrders} createNotif={createNotif} />}
+        {tab === "withdraw" && <Withdraw user={user} profile={profile} wallet={wallet} createNotif={createNotif} />}
         {tab === "profil" && (
           <div>
             <div style={{ fontSize: 18, fontWeight: 700, marginBottom: 16 }}>🏪 Profil Toko</div>
             <div className="card" style={{ maxWidth: 480 }}>
-              {[["Nama Toko", profile?.name],["Email", profile?.email],["WhatsApp", profile?.whatsapp || "-"],["Status", profile?.status === "active" ? "✅ Aktif" : "⏳ Pending"],["Saldo Tersedia", rupiah(wallet?.saldoTersedia || 0)],["Total Penjualan", rupiah(wallet?.totalPenjualan || 0)]].map(([l,v]) => (
+              {[["Nama Toko", profile?.name],["Email", profile?.email],["WhatsApp", profile?.whatsapp || "-"],["Status", isApprovedStatus(profile?.status) ? "✅ Aktif" : "⏳ Pending"],["Saldo Tersedia", rupiah(wallet?.saldoTersedia || 0)],["Total Penjualan", rupiah(wallet?.totalPenjualan || 0)]].map(([l,v]) => (
                 <div key={l} style={{ display: "flex", justifyContent: "space-between", padding: "10px 0", borderBottom: "1px solid var(--border)", fontSize: 14 }}>
                   <span style={{ color: "var(--text2)" }}>{l}</span>
                   <span style={{ fontWeight: 500 }}>{v}</span>
@@ -1570,42 +1297,14 @@ function SellerDashboard({ user, profile, products, orders, wallets, commissionB
   );
 }
 
-function AddProduct({ user, profile, products, hasCommissionDebt = false, commissionDebt = 0, commissionSetting, createNotif }) {
-  const [form, setForm] = useState({ productName: "", category: "", subCategory: "", price: "", stock: "", description: "", weightGram: "", sellerAddress: "", sellerMapLink: "" });
+function AddProduct({ user, profile, products = [], createNotif }) {
+  const sellerApproved = isApprovedStatus(profile?.status);
+  const safeProducts = Array.isArray(products) ? products : [];
+  const [form, setForm] = useState({ productName: "", category: "", subCategory: "", price: "", stock: "", description: "", weightGram: "", sellerAddress: "", sellerLatitude: "", sellerLongitude: "", sellerMapLink: "" });
   const [file, setFile] = useState(null);
   const [preview, setPreview] = useState("");
   const [loading, setLoading] = useState(false);
   const [showForm, setShowForm] = useState(false);
-  const sellerApproved = profile?.status === "active" || profile?.status === "approved";
-
-  if (!sellerApproved) {
-    return (
-      <div>
-        <div style={{ fontSize: 18, fontWeight: 700, marginBottom: 16 }}>📦 Produk Saya</div>
-        <div className="card" style={{ border: "1px solid #F59E0B", background: "#FFF8E1" }}>
-          <div style={{ fontSize: 18, fontWeight: 800, color: "#92400E", marginBottom: 8 }}>⏳ Akun Seller Belum Disetujui</div>
-          <p style={{ fontSize: 14, color: "#78350F", lineHeight: 1.6 }}>
-            Akun seller kamu masih menunggu approval admin. Setelah admin menyetujui akun kamu, tombol upload produk akan aktif otomatis.
-          </p>
-          <div style={{ marginTop: 12, padding: 12, borderRadius: 10, background: "#fff", fontSize: 13, color: "var(--text2)" }}>
-            Status akun: <b>{profile?.status || "pending"}</b>
-          </div>
-        </div>
-      </div>
-    );
-  }
-
-  if (hasCommissionDebt) {
-    return (
-      <div>
-        <div style={{ fontSize: 18, fontWeight: 700, marginBottom: 16 }}>📦 Produk Saya</div>
-        <div className="card" style={{ border: "1px solid #FCA5A5", background: "#FEF2F2" }}>
-          <div style={{ fontSize: 18, fontWeight: 800, color: "#B91C1C", marginBottom: 8 }}>💸 Upload Produk Diblokir Sementara</div>
-          <p style={{ fontSize: 14, color: "#7F1D1D", lineHeight: 1.6 }}>Kamu masih punya tagihan komisi sebesar <b>{rupiah(commissionDebt)}</b>. Lunasi tagihan dulu atau tunggu saldo otomatis dipotong.</p>
-        </div>
-      </div>
-    );
-  }
 
   function handleFile(e) {
     const f = e.target.files[0];
@@ -1617,22 +1316,20 @@ function AddProduct({ user, profile, products, hasCommissionDebt = false, commis
   async function submit(e) {
     e.preventDefault();
     if (!sellerApproved) { alert("Akun seller belum disetujui admin. Kamu belum bisa upload produk."); return; }
-    if (hasCommissionDebt) { alert(`Kamu masih punya tagihan komisi ${rupiah(commissionDebt)}. Lunasi dulu sebelum upload produk.`); return; }
     if (!file) { alert("Pilih gambar dulu"); return; }
     setLoading(true);
     const imageUrl = await uploadImageToCloudinary(file);
-    const needsAdminApproval = form.category === "Jasa Lokal" && form.subCategory === "Jasa Pijat";
     const ref = await addDoc(collection(db, "products"), {
       sellerId: user.uid, sellerName: profile.name, productName: form.productName, category: form.category, subCategory: form.subCategory,
       price: Number(form.price), stock: Number(form.stock), description: form.description,
       weightGram: Number(form.weightGram || 1000), sellerAddress: form.sellerAddress,
-      sellerMapLink: form.sellerMapLink,
-      imageUrl, status: needsAdminApproval ? "pending" : "active", isDeleted: false, commissionType: "percent", commissionValue: Number(commissionSetting?.globalCommissionPercent || 10),
+      sellerLatitude: Number(form.sellerLatitude || 0), sellerLongitude: Number(form.sellerLongitude || 0), sellerMapLink: form.sellerMapLink,
+      imageUrl, status: (form.category === "Jasa Lokal" && form.subCategory === "Jasa Pijat") ? "pending" : "active", isDeleted: false, commissionType: "percent", commissionValue: 10,
       averageRating: 0, totalReviews: 0, createdAt: serverTimestamp(), updatedAt: serverTimestamp(),
     });
     await createNotif({ role: "admin", type: "product_new", title: "Produk Baru", message: `${profile.name} upload produk ${form.productName}`, productId: ref.id });
     setLoading(false); setShowForm(false); setFile(null); setPreview("");
-    alert(needsAdminApproval ? "Jasa Pijat berhasil diupload dan menunggu approval admin." : "Produk berhasil diupload dan langsung aktif.");
+    alert((form.category === "Jasa Lokal" && form.subCategory === "Jasa Pijat") ? "Jasa Pijat berhasil diupload dan menunggu approval admin." : "Produk berhasil diupload dan langsung aktif.");
   }
 
   async function quickEditProduct(p) {
@@ -1649,20 +1346,13 @@ function AddProduct({ user, profile, products, hasCommissionDebt = false, commis
     await updateDoc(doc(db, "products", p.id), { isDeleted: true, updatedAt: serverTimestamp() });
     alert("Produk berhasil dihapus");
   }
-
-  async function editSellerMapLink(p) {
-    const link = prompt("Link Google Maps toko:", p.sellerMapLink || "");
-    if (link === null) return;
-    await updateDoc(doc(db, "products", p.id), { sellerMapLink: link.trim(), updatedAt: serverTimestamp() });
-    alert("Link Google Maps toko berhasil disimpan");
-  }
   return (
     <div>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
-        <div style={{ fontSize: 18, fontWeight: 700 }}>📦 Produk Saya ({products.filter((p) => !p.isDeleted).length})</div>
-        <button className="btn-primary" onClick={() => setShowForm(!showForm)}>+ Tambah Produk</button>
+        <div style={{ fontSize: 18, fontWeight: 700 }}>📦 Produk Saya ({safeProducts.filter((p) => !p?.isDeleted).length})</div>
+        <button className="btn-primary" disabled={!sellerApproved} onClick={() => { if (!sellerApproved) { alert("Akun seller belum disetujui admin."); return; } setShowForm(!showForm); }}>+ Tambah Produk</button>
       </div>
-      {showForm && (
+      {showForm && sellerApproved && (
         <div className="card" style={{ marginBottom: 20 }}>
           <div style={{ fontSize: 16, fontWeight: 700, marginBottom: 16 }}>Tambah Produk Baru</div>
           <form onSubmit={submit} style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
@@ -1701,6 +1391,14 @@ function AddProduct({ user, profile, products, hasCommissionDebt = false, commis
               <label>Alamat Toko</label>
               <input className="form-input" placeholder="Alamat lengkap toko/gudang" onChange={(e) => setForm({ ...form, sellerAddress: e.target.value })} />
             </div>
+            <div className="form-group">
+              <label>Latitude (opsional)</label>
+              <input className="form-input" placeholder="-6.xxx" onChange={(e) => setForm({ ...form, sellerLatitude: e.target.value })} />
+            </div>
+            <div className="form-group">
+              <label>Longitude (opsional)</label>
+              <input className="form-input" placeholder="106.xxx" onChange={(e) => setForm({ ...form, sellerLongitude: e.target.value })} />
+            </div>
             <div className="form-group" style={{ gridColumn: "1/-1" }}>
               <label>Link Google Maps Toko</label>
               <input className="form-input" placeholder="https://maps.google.com/..." onChange={(e) => setForm({ ...form, sellerMapLink: e.target.value })} />
@@ -1721,7 +1419,13 @@ function AddProduct({ user, profile, products, hasCommissionDebt = false, commis
           </form>
         </div>
       )}
-      {products.length === 0 ? (
+      {!sellerApproved && (
+        <div className="card" style={{ border: "1px solid #F59E0B", background: "#FFF8E1", marginBottom: 16 }}>
+          <div style={{ fontWeight: 800, color: "#92400E", marginBottom: 6 }}>⏳ Akun seller belum disetujui</div>
+          <p style={{ fontSize: 13, color: "#78350F" }}>Produk tetap bisa dilihat di sini, tapi upload produk diblokir sampai admin approve akun seller kamu.</p>
+        </div>
+      )}
+      {safeProducts.length === 0 ? (
         <div className="empty-state"><div className="empty-icon">📦</div><p>Belum ada produk</p></div>
       ) : (
         <div style={{ overflow: "auto" }}>
@@ -1730,7 +1434,7 @@ function AddProduct({ user, profile, products, hasCommissionDebt = false, commis
               <tr><th>Produk</th><th>Kategori</th><th>Harga</th><th>Stok</th><th>Status</th><th>Rating</th><th>Aksi</th></tr>
             </thead>
             <tbody>
-              {products.filter((p) => !p.isDeleted).map((p) => {
+              {safeProducts.filter((p) => !p?.isDeleted).map((p) => {
                 const s = statusLabel(p.status);
                 return (
                   <tr key={p.id}>
@@ -1744,8 +1448,8 @@ function AddProduct({ user, profile, products, hasCommissionDebt = false, commis
                     <td><span style={{ color: "var(--orange)", fontWeight: 600 }}>{rupiah(p.price)}</span></td>
                     <td>{p.stock}</td>
                     <td><span className={`badge ${s.cls}`}>{s.label}</span></td>
-                    <td>⭐ {(p.averageRating || 0).toFixed(1)}</td>
-                    <td><button className="btn-ghost btn-sm" onClick={() => quickEditProduct(p)}>Edit</button> <button className="btn-ghost btn-sm" onClick={() => editSellerMapLink(p)}>Edit Maps</button> <button className="btn-ghost btn-sm" style={{ color: "#EF4444", borderColor: "#EF4444" }} onClick={() => softDeleteProduct(p)}>Hapus</button></td>
+                    <td>⭐ {formatRating(p.averageRating)}</td>
+                    <td><button className="btn-ghost btn-sm" onClick={() => quickEditProduct(p)}>Edit</button> <button className="btn-ghost btn-sm" style={{ color: "#EF4444", borderColor: "#EF4444" }} onClick={() => softDeleteProduct(p)}>Hapus</button></td>
                   </tr>
                 );
               })}
@@ -1761,152 +1465,35 @@ function SellerOrders({ orders, createNotif }) {
   const sortedOrders = sortNewest(orders);
   const [shipForm, setShipForm] = useState({});
   const [quoteForm, setQuoteForm] = useState({});
-
-  const isPickup = (o) => o.shippingType === "pickup";
-  const isSameDay = (o) => o.shippingType === "same_day";
-  const isExpedition = (o) => !isPickup(o) && !isSameDay(o);
-
   async function quoteShipping(o) {
     const cost = Number(String(quoteForm[o.id] || "").replace(/\D/g, ""));
     if (!cost || cost < 0) { alert("Isi harga ongkir dulu"); return; }
     const productTotal = Number(o.productTotal || 0);
     const sellerAmount = productTotal - Number(o.adminFee || 0) + cost;
     const totalAmount = productTotal + cost;
-    await updateDoc(doc(db, "orders", o.id), {
-      shippingCost: cost,
-      totalAmount,
-      sellerAmount,
-      pendingShippingQuote: false,
-      statusPembayaran: o.paymentMethod === "cash" ? "tunai" : "menunggu_pembayaran",
-      statusPesanan: o.paymentMethod === "cash" ? "pesanan_masuk" : "menunggu_pembayaran",
-      courierService: `Ongkir: ${rupiah(cost)}`,
-      updatedAt: serverTimestamp()
-    });
-    if (o.paymentMethod === "cash") {
-      await createCashCommissionBill(o.id, { sellerId: o.sellerId, sellerName: o.sellerName || "", productName: o.productName, adminFee: o.adminFee }, createNotif);
-    }
+    await updateDoc(doc(db, "orders", o.id), { shippingCost: cost, totalAmount, sellerAmount, pendingShippingQuote: false, statusPembayaran: o.paymentMethod === "cash" ? "tunai" : "menunggu_pembayaran", statusPesanan: o.paymentMethod === "cash" ? "pesanan_masuk" : "menunggu_pembayaran", courierService: `Ongkir: ${rupiah(cost)}`, updatedAt: serverTimestamp() });
     await createNotif({ role: "buyer", userId: o.buyerId, type: "shipping_quote_ready", title: "Ongkir Sudah Dihitung", message: `Ongkir ${o.productName} adalah ${rupiah(cost)}. Silakan lanjutkan pembayaran.`, orderId: o.id });
     alert("Ongkir dikirim ke buyer");
   }
-
   async function processOrder(o) {
-    if (isPickup(o)) {
-      alert("Ambil di tempat tidak memakai proses/kirim. Konfirmasi setelah pembeli datang.");
-      return;
-    }
     if (o.statusPembayaran !== "sudah_dibayar" && o.paymentMethod !== "cash") { alert("Order transfer harus di-approve admin dulu"); return; }
     await updateDoc(doc(db, "orders", o.id), { statusPesanan: "diproses", processedAt: serverTimestamp(), updatedAt: serverTimestamp() });
     await createNotif({ role: "buyer", userId: o.buyerId, type: "order_processing", title: "Pesanan Diproses", message: `Pesanan ${o.productName} sedang diproses seller.`, orderId: o.id });
   }
-
-  async function confirmPickup(o) {
-    if (!confirm("Konfirmasi hanya setelah pembeli sudah datang dan mengambil pesanan. Lanjutkan?")) return;
-    await updateDoc(doc(db, "orders", o.id), { statusPesanan: "selesai", pickupConfirmedAt: serverTimestamp(), receivedAt: serverTimestamp(), updatedAt: serverTimestamp() });
-    await createNotif({ role: "buyer", userId: o.buyerId, type: "order_done", title: "Pesanan Diambil", message: `Pesanan ${o.productName} sudah dikonfirmasi seller. Silakan beri ulasan bintang dan komentar.`, orderId: o.id });
-    alert("Pesanan ambil di tempat sudah dikonfirmasi. Buyer akan diminta beri ulasan.");
-  }
-
-  async function sendSameDay(o) {
-    await updateDoc(doc(db, "orders", o.id), { statusPesanan: "dikirim", expeditionName: "Same Day Lokal", trackingNumber: "", shippedAt: serverTimestamp(), updatedAt: serverTimestamp() });
-    await createNotif({ role: "buyer", userId: o.buyerId, type: "order_shipped", title: "Pesanan Same Day Dikirim", message: `Pesanan ${o.productName} sedang dikirim oleh seller.`, orderId: o.id });
-    alert("Pesanan Same Day ditandai sedang dikirim");
-  }
-
   async function sendTracking(o) {
-    if (isPickup(o) || isSameDay(o)) {
-      alert("Resi hanya untuk ekspedisi. Ambil di tempat dan Same Day tidak memakai nomor resi.");
-      return;
-    }
     const data = shipForm[o.id] || {};
     if (!data.expeditionName || !data.trackingNumber) { alert("Isi nama ekspedisi dan nomor resi"); return; }
     await updateDoc(doc(db, "orders", o.id), { statusPesanan: "dikirim", expeditionName: data.expeditionName, trackingNumber: data.trackingNumber, shippedAt: serverTimestamp(), updatedAt: serverTimestamp() });
     await createNotif({ role: "buyer", userId: o.buyerId, type: "order_shipped", title: "Pesanan Dikirim 🚚", message: `Pesanan ${o.productName} dikirim via ${data.expeditionName}. Resi: ${data.trackingNumber}`, orderId: o.id });
     alert("Resi berhasil dikirim ke buyer");
   }
-
   return (
-    <div>
-      <div style={{ fontSize: 18, fontWeight: 700, marginBottom: 20 }}>🛒 Pesanan Masuk ({sortedOrders.length})</div>
-      {sortedOrders.length === 0 ? (
-        <div className="empty-state"><div className="empty-icon">🛒</div><p>Belum ada pesanan masuk</p></div>
-      ) : sortedOrders.map((o) => {
-        const s = statusLabel(o.statusPesanan);
-        const needQuote = o.statusPembayaran === "menunggu_ongkir" || o.pendingShippingQuote;
-        return (
-          <div key={o.id} className="card" style={{ marginBottom: 14 }}>
-            <div style={{ display: "flex", gap: 14, alignItems: "flex-start", flexWrap: "wrap" }}>
-              <img src={o.productImage || "https://via.placeholder.com/72?text=No"} alt={o.productName} style={{ width: 72, height: 72, borderRadius: 10, objectFit: "cover", flexShrink: 0 }} />
-              <div style={{ flex: 1 }}>
-                <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 6, flexWrap: "wrap" }}>
-                  <span style={{ fontWeight: 700, fontSize: 15 }}>{o.productName}</span>
-                  <span className={`badge ${s.cls}`}>{s.label}</span>
-                </div>
-                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(140px, 1fr))", gap: "4px 16px", fontSize: 13, color: "var(--text2)" }}>
-                  <span>Pembeli: {o.buyerName}</span>
-                  <span>WA: {o.buyerWhatsapp}</span>
-                  <span>Qty: {o.quantity}</span>
-                  <span>Subtotal: {rupiah(o.productTotal)}</span>
-                  <span>Ongkir: {rupiah(o.shippingCost)}</span>
-                  <span>Total Bayar: <b style={{ color: "var(--orange)" }}>{rupiah(o.totalAmount)}</b></span>
-                  <span>Kurir: {o.courierName}</span>
-                  <span>Saldo bersih: <b style={{ color: "#10B981" }}>{rupiah(o.sellerAmount)}</b></span>
-                </div>
-                {o.buyerAddress && <div style={{ fontSize: 12, color: "var(--text3)", marginTop: 4 }}>📍 {o.buyerAddress}</div>}
-                {isPickup(o) && o.sellerMapLink && <div style={{ fontSize: 12, marginTop: 6 }}>Link lokasi toko: <button type="button" className="btn-primary btn-sm" onClick={() => window.open(o.sellerMapLink, "_blank")} style={{ marginLeft: 6 }}>Buka Maps Toko</button><br/><b>Siapkan pesanannya dan lakukan konfirmasi setelah pembeli datang.</b></div>}
-                {isSameDay(o) && o.buyerMapsLink && <div style={{ fontSize: 12, marginTop: 6 }}>Maps pembeli: <button type="button" className="btn-primary btn-sm" onClick={() => window.open(o.buyerMapsLink, "_blank")} style={{ marginLeft: 6 }}>Buka Maps Pembeli</button></div>}
-                {isExpedition(o) && (o.buyerVillage || o.buyerDistrict || o.buyerRegency) && <div style={{ fontSize: 12, marginTop: 6 }}>Alamat ongkir: {o.buyerVillage}, {o.buyerDistrict}, {o.buyerRegency} <button type="button" className="btn-primary btn-sm" onClick={() => window.open("https://rajaongkir.com/cek-ongkir", "_blank")} style={{ marginLeft: 8 }}>Cek Ongkir</button></div>}
-              </div>
-            </div>
-
-            {o.paymentProofUrl && <div style={{ marginTop: 10 }}><img src={o.paymentProofUrl} alt="Bukti" style={{ width: 160, height: 100, objectFit: "cover", borderRadius: 8 }} /></div>}
-
-            {needQuote && !isPickup(o) && (
-              <div style={{ marginTop: 12, padding: 12, background: "#FFF8E1", borderRadius: 8 }}>
-                <div style={{ fontWeight: 700, marginBottom: 8 }}>{isSameDay(o) ? "Isi Ongkir Same Day" : "Isi Ongkir Ekspedisi"}</div>
-                {isExpedition(o) && <button type="button" className="btn-primary btn-sm" style={{ marginBottom: 8 }} onClick={() => window.open("https://rajaongkir.com/cek-ongkir", "_blank")}>Cek Ongkir</button>}
-                <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                  <input className="form-input" style={{ maxWidth: 220 }} placeholder="Harga ongkir, contoh 15000" value={quoteForm[o.id] || ""} onChange={(e) => setQuoteForm({ ...quoteForm, [o.id]: Number(e.target.value.replace(/\D/g, "") || 0).toLocaleString("id-ID") })} />
-                  <button className="btn-primary btn-sm" onClick={() => quoteShipping(o)}>Kirim Ongkir</button>
-                </div>
-              </div>
-            )}
-
-            <div style={{ marginTop: 12, display: "flex", gap: 8, flexWrap: "wrap" }}>
-              {!needQuote && isPickup(o) && o.statusPesanan === "pesanan_masuk" && (
-                <div style={{ width: "100%" }}>
-                  <div style={{ fontSize: 13, fontWeight: 700, color: "var(--orange)", marginBottom: 8 }}>Konfirmasi ketika pembeli sudah datang dan mengambil pesanan.</div>
-                  <button className="btn-primary btn-sm" onClick={() => confirmPickup(o)}>✅ Konfirmasi Pembeli Datang</button>
-                </div>
-              )}
-
-              {!needQuote && !isPickup(o) && o.statusPesanan === "pesanan_masuk" && (
-                <button className="btn-primary btn-sm" onClick={() => processOrder(o)}>🔄 Proses</button>
-              )}
-
-              {isSameDay(o) && o.statusPesanan === "diproses" && (
-                <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
-                  {o.buyerMapsLink && <button type="button" className="btn-ghost btn-sm" onClick={() => window.open(o.buyerMapsLink, "_blank")}>Buka Maps Pembeli</button>}
-                  <button className="btn-primary btn-sm" style={{ background: "#3B82F6" }} onClick={() => sendSameDay(o)}>🚚 Kirim</button>
-                </div>
-              )}
-
-              {isExpedition(o) && o.statusPesanan === "diproses" && (
-                <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
-                  <input className="form-input" style={{ maxWidth: 180 }} placeholder="Nama ekspedisi" value={shipForm[o.id]?.expeditionName || ""} onChange={(e) => setShipForm({ ...shipForm, [o.id]: { ...(shipForm[o.id] || {}), expeditionName: e.target.value } })} />
-                  <input className="form-input" style={{ maxWidth: 180 }} placeholder="Nomor resi" value={shipForm[o.id]?.trackingNumber || ""} onChange={(e) => setShipForm({ ...shipForm, [o.id]: { ...(shipForm[o.id] || {}), trackingNumber: e.target.value } })} />
-                  <button className="btn-primary btn-sm" style={{ background: "#3B82F6" }} onClick={() => sendTracking(o)}>🚚 Kirim Resi</button>
-                </div>
-              )}
-            </div>
-          </div>
-        );
-      })}
-    </div>
+    <div><div style={{ fontSize: 18, fontWeight: 700, marginBottom: 20 }}>🛒 Pesanan Masuk ({sortedOrders.length})</div>{sortedOrders.length === 0 ? <div className="empty-state"><div className="empty-icon">🛒</div><p>Belum ada pesanan masuk</p></div> : sortedOrders.map((o) => { const s = statusLabel(o.statusPesanan); const needQuote = o.statusPembayaran === "menunggu_ongkir" || o.pendingShippingQuote; return <div key={o.id} className="card" style={{ marginBottom: 14 }}><div style={{ display: "flex", gap: 14, alignItems: "flex-start", flexWrap: "wrap" }}><img src={o.productImage || "https://via.placeholder.com/72?text=No"} alt={o.productName} style={{ width: 72, height: 72, borderRadius: 10, objectFit: "cover", flexShrink: 0 }} /><div style={{ flex: 1 }}><div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 6, flexWrap: "wrap" }}><span style={{ fontWeight: 700, fontSize: 15 }}>{o.productName}</span><span className={`badge ${s.cls}`}>{s.label}</span></div><div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(140px, 1fr))", gap: "4px 16px", fontSize: 13, color: "var(--text2)" }}><span>Pembeli: {o.buyerName}</span><span>WA: {o.buyerWhatsapp}</span><span>Qty: {o.quantity}</span><span>Subtotal: {rupiah(o.productTotal)}</span><span>Ongkir: {rupiah(o.shippingCost)}</span><span>Total Bayar: <b style={{ color: "var(--orange)" }}>{rupiah(o.totalAmount)}</b></span><span>Kurir: {o.courierName}</span><span>Saldo bersih: <b style={{ color: "#10B981" }}>{rupiah(o.sellerAmount)}</b></span></div>{o.buyerAddress && <div style={{ fontSize: 12, color: "var(--text3)", marginTop: 4 }}>📍 {o.buyerAddress}</div>}{o.sellerMapLink && o.shippingType === "pickup" && <div style={{ fontSize: 12, marginTop: 6 }}>Link lokasi toko: <button type="button" className="btn-primary btn-sm" onClick={() => window.open(o.sellerMapLink, "_blank")} style={{ marginLeft: 6 }}>Buka Maps Toko</button><br/><b>Siapkan pesanannya dan lakukan konfirmasi setelah pembeli datang.</b></div>}{o.buyerMapsLink && <div style={{ fontSize: 12, marginTop: 6 }}>Maps pembeli: <button type="button" className="btn-primary btn-sm" onClick={() => window.open(o.buyerMapsLink, "_blank")} style={{ marginLeft: 6 }}>Buka Maps Pembeli</button></div>}{(o.buyerVillage || o.buyerDistrict || o.buyerRegency) && <div style={{ fontSize: 12, marginTop: 6 }}>Alamat ongkir: {o.buyerVillage}, {o.buyerDistrict}, {o.buyerRegency} <button type="button" className="btn-primary btn-sm" onClick={() => window.open("https://rajaongkir.com/cek-ongkir", "_blank")} style={{ marginLeft: 8 }}>Cek Ongkir</button></div>}</div></div>{o.paymentProofUrl && <div style={{ marginTop: 10 }}><img src={o.paymentProofUrl} alt="Bukti" style={{ width: 160, height: 100, objectFit: "cover", borderRadius: 8 }} /></div>}{needQuote && <div style={{ marginTop: 12, padding: 12, background: "#FFF8E1", borderRadius: 8 }}><div style={{ fontWeight: 700, marginBottom: 8 }}>{o.shippingType === "same_day" ? "Isi Ongkir Same Day" : "Isi Ongkir Ekspedisi"}</div>{o.shippingType !== "same_day" && <button type="button" className="btn-primary btn-sm" style={{ marginBottom: 8 }} onClick={() => window.open("https://rajaongkir.com/cek-ongkir", "_blank")}>Cek Ongkir</button>}<div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}><input className="form-input" style={{ maxWidth: 220 }} placeholder="Harga ongkir, contoh 15000" value={quoteForm[o.id] || ""} onChange={(e) => setQuoteForm({ ...quoteForm, [o.id]: Number(e.target.value.replace(/\D/g, "") || 0).toLocaleString("id-ID") })} /><button className="btn-primary btn-sm" onClick={() => quoteShipping(o)}>Kirim Ongkir</button></div></div>}<div style={{ marginTop: 12, display: "flex", gap: 8, flexWrap: "wrap" }}>{!needQuote && o.statusPesanan === "pesanan_masuk" && <button className="btn-primary btn-sm" onClick={() => processOrder(o)}>🔄 Proses</button>}{o.statusPesanan === "diproses" && <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}><input className="form-input" style={{ maxWidth: 180 }} placeholder="Nama ekspedisi" value={shipForm[o.id]?.expeditionName || ""} onChange={(e) => setShipForm({ ...shipForm, [o.id]: { ...(shipForm[o.id] || {}), expeditionName: e.target.value } })} /><input className="form-input" style={{ maxWidth: 180 }} placeholder="Nomor resi" value={shipForm[o.id]?.trackingNumber || ""} onChange={(e) => setShipForm({ ...shipForm, [o.id]: { ...(shipForm[o.id] || {}), trackingNumber: e.target.value } })} /><button className="btn-primary btn-sm" style={{ background: "#3B82F6" }} onClick={() => sendTracking(o)}>🚚 Kirim Resi</button></div>}</div></div>; })}</div>
   );
 }
 
 
-function Withdraw({ user, profile, wallet, hasCommissionDebt = false, commissionDebt = 0, createNotif }) {
+function Withdraw({ user, profile, wallet, createNotif }) {
   const [amountText, setAmountText] = useState("");
   const [form, setForm] = useState({ bankName: "", accountNumber: "", accountHolder: "" });
   const [loading, setLoading] = useState(false);
@@ -1914,44 +1501,17 @@ function Withdraw({ user, profile, wallet, hasCommissionDebt = false, commission
 
   async function submit(e) {
     e.preventDefault();
-    if (hasCommissionDebt) { alert(`Masih ada tagihan komisi ${rupiah(commissionDebt)}. Penarikan diblokir sampai lunas.`); return; }
     if (amount < 10000) { alert("Minimal penarikan adalah Rp10.000"); return; }
-    if (amount > Number(wallet?.saldoTersedia || 0)) { alert("Saldo tersedia tidak cukup untuk penarikan ini"); return; }
     setLoading(true);
-    try {
-      const withdrawalRef = doc(collection(db, "withdrawals"));
-      const walletRef = doc(db, "seller_wallets", user.uid);
-      const batch = writeBatch(db);
-      batch.update(walletRef, {
-        saldoTersedia: increment(-amount),
-        saldoTertahan: increment(amount),
-        updatedAt: serverTimestamp(),
-      });
-      batch.set(withdrawalRef, {
-        sellerId: user.uid, sellerName: profile.name, amount, bankName: form.bankName,
-        accountNumber: form.accountNumber, accountHolder: form.accountHolder, status: "pending",
-        createdAt: serverTimestamp(), updatedAt: serverTimestamp()
-      });
-      batch.set(doc(collection(db, "wallet_transactions")), {
-        sellerId: user.uid, withdrawalId: withdrawalRef.id, type: "withdraw_request", amount,
-        note: "Request penarikan, saldo dipindahkan ke saldo tertahan", createdAt: serverTimestamp()
-      });
-      await batch.commit();
-      await createNotif({ role: "admin", type: "withdraw_new", title: "Penarikan Baru", message: `Penarikan baru dari ${profile.name} sebesar ${rupiah(amount)} ke ${form.bankName}`, withdrawalId: withdrawalRef.id });
-      setAmountText(""); setForm({ bankName: "", accountNumber: "", accountHolder: "" });
-      alert("Pengajuan penarikan berhasil dikirim. Saldo masuk ke saldo tertahan sampai admin memproses.");
-    } catch (error) {
-      console.error("Gagal mengajukan penarikan:", error);
-      alert("Gagal mengajukan penarikan. Coba lagi.");
-    } finally {
-      setLoading(false);
-    }
+    const ref = await addDoc(collection(db, "withdrawals"), { sellerId: user.uid, sellerName: profile.name, amount, bankName: form.bankName, accountNumber: form.accountNumber, accountHolder: form.accountHolder, status: "pending", createdAt: serverTimestamp(), updatedAt: serverTimestamp() });
+    await createNotif({ role: "admin", type: "withdraw_new", title: "Penarikan Baru", message: `Penarikan baru dari ${profile.name} sebesar ${rupiah(amount)} ke ${form.bankName}`, withdrawalId: ref.id });
+    setLoading(false); setAmountText(""); setForm({ bankName: "", accountNumber: "", accountHolder: "" });
+    alert("Pengajuan penarikan berhasil dikirim");
   }
 
   return (
     <div>
       <div style={{ fontSize: 18, fontWeight: 700, marginBottom: 20 }}>💰 Penarikan Saldo</div>
-      {hasCommissionDebt && <div style={{ background: "#FEF2F2", border: "1px solid #FCA5A5", borderRadius: 10, padding: 14, marginBottom: 16, color: "#B91C1C", fontSize: 13 }}>Penarikan diblokir karena ada tagihan komisi: <b>{rupiah(commissionDebt)}</b>.</div>}
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14, marginBottom: 24 }}>
         <div className="stat-card">
           <div className="stat-icon" style={{ background: "#10B98115" }}><span>💰</span></div>
@@ -1992,162 +1552,17 @@ function Withdraw({ user, profile, wallet, hasCommissionDebt = false, commission
 }
 
 /* ─── ADMIN DASHBOARD ────────────────────────── */
-
-function SellerCommissionBills({ bills = [], paymentSetting, createNotif }) {
-  const [proofFiles, setProofFiles] = useState({});
-  const openBills = bills.filter(isOpenCommissionBill);
-
-  async function uploadProof(bill) {
-    const file = proofFiles[bill.id];
-    if (!file) { alert("Pilih bukti pembayaran komisi dulu"); return; }
-    if (file.size > 1024 * 1024) { alert("Ukuran bukti maksimal 1MB"); return; }
-    try {
-      const url = await uploadImageToCloudinary(file);
-      await updateDoc(doc(db, "komisi_tagihan", bill.id), {
-        proofUrl: url,
-        status: "menunggu_approval",
-        proofUploadedAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
-      });
-      if (bill.orderId) {
-        await updateDoc(doc(db, "orders", bill.orderId), {
-          cashCommissionProofUrl: url,
-          cashCommissionStatus: "menunggu_approval",
-          updatedAt: serverTimestamp(),
-        });
-      }
-      await createNotif({ role: "admin", type: "commission_proof", title: "Bukti Komisi Tunai", message: `Seller mengirim bukti pembayaran komisi ${rupiah(bill.remaining || bill.amount)}`, billId: bill.id, orderId: bill.orderId || null });
-      setProofFiles({ ...proofFiles, [bill.id]: null });
-      alert("Bukti komisi berhasil dikirim. Menunggu approval admin.");
-    } catch (error) {
-      console.error("Gagal upload bukti komisi", error);
-      alert("Gagal upload bukti komisi. Coba lagi.");
-    }
-  }
-
-  return (
-    <div>
-      <div style={{ fontSize: 18, fontWeight: 700, marginBottom: 16 }}>💸 Tagihan Komisi Tunai</div>
-      {openBills.length === 0 ? (
-        <div className="empty-state"><div className="empty-icon">✅</div><p>Tidak ada tagihan komisi terbuka</p></div>
-      ) : openBills.map((bill) => (
-        <div key={bill.id} className="card" style={{ marginBottom: 12 }}>
-          <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
-            <div>
-              <div style={{ fontWeight: 800 }}>{bill.productName || "Tagihan Komisi"}</div>
-              <div style={{ fontSize: 13, color: "var(--text2)" }}>Sisa tagihan: <b style={{ color: "#EF4444" }}>{rupiah(bill.remaining || bill.amount)}</b></div>
-              <div style={{ fontSize: 12, color: "var(--text3)" }}>Status: {bill.status}</div>
-            </div>
-            <span className={`badge ${bill.status === "menunggu_approval" ? "badge-yellow" : "badge-red"}`}>{bill.status === "menunggu_approval" ? "Menunggu Admin" : "Belum Lunas"}</span>
-          </div>
-          {bill.status !== "menunggu_approval" && (
-            <div style={{ marginTop: 12, background: "#FFF8E1", borderRadius: 10, padding: 12 }}>
-              <div style={{ fontWeight: 700, marginBottom: 8 }}>Bayar ke Rekening Admin</div>
-              <div style={{ fontSize: 13, color: "var(--text2)", marginBottom: 8 }}>
-                Bank: <b>{paymentSetting?.bankName || "Belum diatur"}</b><br/>
-                No Rekening: <b>{paymentSetting?.accountNumber || "-"}</b><br/>
-                Atas Nama: <b>{paymentSetting?.accountHolder || "-"}</b>
-              </div>
-              <input className="form-input" type="file" accept="image/jpeg,image/png,image/webp" onChange={(e) => setProofFiles({ ...proofFiles, [bill.id]: e.target.files?.[0] || null })} />
-              <button className="btn-primary btn-sm" style={{ marginTop: 8 }} onClick={() => uploadProof(bill)}>Kirim Bukti Komisi</button>
-            </div>
-          )}
-          {bill.proofUrl && <img src={bill.proofUrl} alt="Bukti komisi" style={{ marginTop: 10, width: 160, height: 100, objectFit: "cover", borderRadius: 8 }} />}
-        </div>
-      ))}
-    </div>
-  );
-}
-
-function AdminCommissionBills({ bills = [], createNotif }) {
-  const sorted = sortNewest(bills);
-
-  async function approveBill(bill) {
-    await updateDoc(doc(db, "komisi_tagihan", bill.id), {
-      status: "approved",
-      remaining: 0,
-      approvedAt: serverTimestamp(),
-      updatedAt: serverTimestamp(),
-    });
-    if (bill.orderId) {
-      await updateDoc(doc(db, "orders", bill.orderId), {
-        cashCommissionStatus: "approved",
-        cashCommissionRemaining: 0,
-        cashCommissionApprovedAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
-      });
-    }
-    await addDoc(collection(db, "wallet_transactions"), {
-      sellerId: bill.sellerId,
-      billId: bill.id,
-      orderId: bill.orderId || null,
-      type: "cash_commission_manual_approved",
-      amount: Number(bill.remaining || bill.amount || 0),
-      note: "Komisi tunai disetujui admin dari bukti transfer",
-      createdAt: serverTimestamp(),
-    });
-    await createNotif({ role: "seller", userId: bill.sellerId, type: "commission_approved", title: "Komisi Tunai Disetujui", message: `Bukti pembayaran komisi ${rupiah(bill.amount)} disetujui admin.`, billId: bill.id, orderId: bill.orderId || null });
-    alert("Komisi disetujui");
-  }
-
-  async function cancelBill(bill) {
-    await updateDoc(doc(db, "komisi_tagihan", bill.id), {
-      status: "cancelled",
-      proofUrl: "",
-      cancelledAt: serverTimestamp(),
-      updatedAt: serverTimestamp(),
-    });
-    if (bill.orderId) {
-      await updateDoc(doc(db, "orders", bill.orderId), {
-        cashCommissionStatus: "cancelled",
-        cashCommissionProofUrl: "",
-        updatedAt: serverTimestamp(),
-      });
-    }
-    await createNotif({ role: "seller", userId: bill.sellerId, type: "commission_cancelled", title: "Bukti Komisi Ditolak", message: `Bukti pembayaran komisi ditolak. Silakan upload ulang.`, billId: bill.id, orderId: bill.orderId || null });
-    alert("Tagihan dikembalikan ke seller untuk upload ulang");
-  }
-
-  return (
-    <div>
-      <div style={{ fontSize: 18, fontWeight: 700, marginBottom: 16 }}>💸 Komisi Tunai Seller</div>
-      {sorted.length === 0 ? <div className="empty-state"><div className="empty-icon">💸</div><p>Belum ada tagihan komisi</p></div> : sorted.map((bill) => (
-        <div key={bill.id} className="card" style={{ marginBottom: 12 }}>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 10, fontSize: 13 }}>
-            <div><b>Seller</b><br/>{bill.sellerName || bill.sellerId}</div>
-            <div><b>Produk</b><br/>{bill.productName || "-"}</div>
-            <div><b>Tagihan</b><br/><span style={{ color: "var(--orange)", fontWeight: 800 }}>{rupiah(bill.remaining || bill.amount)}</span></div>
-            <div><b>Status</b><br/><span className={`badge ${bill.status === "approved" || bill.status === "auto_paid" ? "badge-green" : bill.status === "menunggu_approval" ? "badge-yellow" : "badge-red"}`}>{bill.status}</span></div>
-          </div>
-          {bill.proofUrl && <img src={bill.proofUrl} alt="Bukti komisi" style={{ marginTop: 10, width: 180, height: 110, objectFit: "cover", borderRadius: 8 }} />}
-          {bill.status === "menunggu_approval" && (
-            <div style={{ marginTop: 10, display: "flex", gap: 8 }}>
-              <button className="btn-primary btn-sm" onClick={() => approveBill(bill)}>Approve Komisi</button>
-              <button className="btn-ghost btn-sm" style={{ color: "#EF4444", borderColor: "#EF4444" }} onClick={() => cancelBill(bill)}>Cancel/Tolak</button>
-            </div>
-          )}
-        </div>
-      ))}
-    </div>
-  );
-}
-
-function AdminDashboard({ profile, products, orders, withdrawals, paymentSetting, manualBalance, commissionSetting, wallets, commissionBills = [], users, createNotif, onLogout }) {
+function AdminDashboard({ profile, products, orders, withdrawals, paymentSetting, manualBalance, wallets, createNotif, onLogout }) {
   const [tab, setTab] = useState("order");
   const autoBalance = wallets.reduce((sum, w) => sum + Number(w.saldoTersedia || 0), 0);
   const displayedBalance = manualBalance?.isManualBalanceActive ? Number(manualBalance.totalSellerBalanceManual || 0) : autoBalance;
 
   const isAdmin = profile.role === "admin";
-  const isSubAdmin = profile.role === "sub_admin";
   const tabs = [
     { id: "order", label: "Order Masuk", icon: "🛒" },
-    { id: "sellerApproval", label: "Approve Seller", icon: "✅" },
     ...(isAdmin ? [
       { id: "produk", label: "Kelola Produk", icon: "📦" },
-      { id: "users", label: "Kelola Akun", icon: "👥" },
       { id: "withdraw", label: "Penarikan", icon: "💰" },
-      { id: "commission", label: "Komisi Tunai", icon: "💸" },
-      { id: "commissionSetting", label: "Komisi Global", icon: "📊" },
       { id: "payment", label: "Rekening", icon: "💳" },
       { id: "balance", label: "Saldo Manual", icon: "⚙️" },
       { id: "admins", label: "Tambah Admin", icon: "👤" },
@@ -2180,11 +1595,10 @@ function AdminDashboard({ profile, products, orders, withdrawals, paymentSetting
       <div className="dash-content">
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 14, marginBottom: 24 }}>
           {[
-            { label: "Total Produk", value: products.length, icon: "📦", color: "#EE4D2D" },
-            { label: "Total Order", value: orders.length, icon: "🛒", color: "#3B82F6" },
+            { label: "Total Produk", value: sellerProducts.length, icon: "📦", color: "#EE4D2D" },
+            { label: "Total Order", value: sellerOrders.length, icon: "🛒", color: "#3B82F6" },
             { label: "Penarikan", value: withdrawals.length, icon: "💸", color: "#F59E0B" },
             { label: "Saldo Seller", value: rupiah(displayedBalance), icon: "💰", color: "#10B981" },
-            { label: "Tagihan Komisi", value: rupiah(sumCommissionDebt(commissionBills)), icon: "💸", color: "#EF4444" },
           ].map((s) => (
             <div key={s.label} className="stat-card">
               <div className="stat-icon" style={{ background: s.color + "15" }}><span>{s.icon}</span></div>
@@ -2194,176 +1608,11 @@ function AdminDashboard({ profile, products, orders, withdrawals, paymentSetting
           ))}
         </div>
         {tab === "order" && <AdminOrders orders={orders} createNotif={createNotif} />}
-        {tab === "sellerApproval" && (isAdmin || isSubAdmin) && <AdminSellerApprovals users={users} />}
         {tab === "produk" && isAdmin && <AdminProducts products={products} />}
-        {tab === "users" && isAdmin && <AdminUsers users={users} products={products} />}
         {tab === "withdraw" && isAdmin && <AdminWithdraw withdrawals={withdrawals} />}
-        {tab === "commission" && isAdmin && <AdminCommissionBills bills={commissionBills} createNotif={createNotif} />}
-        {tab === "commissionSetting" && isAdmin && <AdminCommissionSetting current={commissionSetting} products={products} />}
         {tab === "payment" && isAdmin && <PaymentSetting paymentSetting={paymentSetting} />}
         {tab === "balance" && isAdmin && <ManualBalance />}
         {tab === "admins" && isAdmin && <CreateSubAdmin />}
-      </div>
-    </div>
-  );
-}
-
-
-
-function AdminSellerApprovals({ users = [] }) {
-  const pendingSellers = users
-    .filter((u) => u.role === "seller" && u.status !== "active" && u.status !== "approved" && !u.isDeleted)
-    .sort((a, b) => getMillis(b.createdAt) - getMillis(a.createdAt));
-
-  async function approveSeller(u) {
-    if (u.role !== "seller") return;
-    const sellerId = u.uid || u.id;
-    if (!sellerId) {
-      alert("ID seller tidak ditemukan.");
-      return;
-    }
-    await updateDoc(doc(db, "users", sellerId), {
-      status: "active",
-      approvedAt: serverTimestamp(),
-    });
-    await setDoc(doc(db, "seller_wallets", sellerId), {
-      sellerId,
-      sellerName: u.name || u.email || "Seller",
-      saldoTersedia: 0,
-      saldoTertahan: 0,
-      totalPenjualan: 0,
-      totalDitarik: 0,
-    }, { merge: true });
-    await addDoc(collection(db, "notifications"), {
-      role: "seller",
-      userId: sellerId,
-      type: "seller_approved",
-      title: "Akun Seller Disetujui ✅",
-      message: "Akun seller kamu sudah disetujui admin. Sekarang kamu bisa upload produk.",
-      isRead: false,
-      createdAt: serverTimestamp(),
-    });
-    alert("Seller berhasil di-approve. Seller sekarang bisa upload produk.");
-  }
-
-  return (
-    <div>
-      <div style={{ fontSize: 18, fontWeight: 700, marginBottom: 16 }}>✅ Approve Seller</div>
-      {pendingSellers.length === 0 ? (
-        <div className="empty-state">
-          <div className="empty-icon">✅</div>
-          <p style={{ fontWeight: 600, fontSize: 15, marginBottom: 6 }}>Tidak ada seller menunggu approval</p>
-          <p style={{ fontSize: 13, color: "var(--text3)" }}>Seller baru yang mendaftar akan muncul di sini.</p>
-        </div>
-      ) : (
-        <div style={{ display: "grid", gap: 12 }}>
-          {pendingSellers.map((u) => (
-            <div className="card" key={u.uid || u.id} style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
-              <div>
-                <div style={{ fontWeight: 700 }}>{u.name || "Seller Baru"}</div>
-                <div style={{ fontSize: 13, color: "var(--text3)" }}>{u.email || "-"}</div>
-                <div style={{ fontSize: 12, marginTop: 4 }}>Status: <b>{u.status || "pending"}</b></div>
-              </div>
-              <button className="btn-primary btn-sm" onClick={() => approveSeller(u)}>Approve Seller</button>
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function AdminUsers({ users = [], products = [] }) {
-  const [filter, setFilter] = useState("all");
-  const visibleUsers = users
-    .filter((u) => u.role === "buyer" || u.role === "seller" || u.role === "deleted")
-    .filter((u) => filter === "all" ? true : u.role === filter)
-    .sort((a, b) => getMillis(b.createdAt) - getMillis(a.createdAt));
-
-  async function approveSeller(u) {
-    if (u.role !== "seller") return;
-    await updateDoc(doc(db, "users", u.uid || u.id), {
-      status: "active",
-      approvedAt: serverTimestamp(),
-    });
-    await setDoc(doc(db, "seller_wallets", u.uid || u.id), {
-      sellerId: u.uid || u.id,
-      sellerName: u.name || u.email || "Seller",
-      saldoTersedia: 0,
-      saldoTertahan: 0,
-      totalPenjualan: 0,
-      totalDitarik: 0,
-    }, { merge: true });
-    await addDoc(collection(db, "notifications"), {
-      role: "seller",
-      userId: u.uid || u.id,
-      type: "seller_approved",
-      title: "Akun Seller Disetujui ✅",
-      message: "Akun seller kamu sudah disetujui admin. Sekarang kamu bisa upload produk.",
-      isRead: false,
-      createdAt: serverTimestamp(),
-    });
-    alert("Akun seller berhasil disetujui. Seller sekarang bisa upload produk.");
-  }
-
-  async function deleteAccount(u) {
-    if (u.role !== "buyer" && u.role !== "seller") {
-      alert("Hanya akun buyer atau seller yang bisa dihapus dari menu ini.");
-      return;
-    }
-    if (!confirm(`Hapus akun ${u.name || u.email}? Akun akan dinonaktifkan dari dashboard.`)) return;
-    await updateDoc(doc(db, "users", u.uid || u.id), {
-      status: "deleted",
-      previousRole: u.role,
-      role: "deleted",
-      isDeleted: true,
-      deletedAt: serverTimestamp(),
-    });
-    if (u.role === "seller") {
-      const snap = await getDocs(query(collection(db, "products"), where("sellerId", "==", u.uid || u.id)));
-      await Promise.all(snap.docs.map((d) => updateDoc(doc(db, "products", d.id), { isDeleted: true, updatedAt: serverTimestamp() })));
-    }
-    alert("Akun berhasil dinonaktifkan. Jika ini akun seller, produk seller juga disembunyikan.");
-  }
-
-  return (
-    <div>
-      <div style={{ fontSize: 18, fontWeight: 700, marginBottom: 16 }}>👥 Kelola Akun Buyer & Seller</div>
-      <div style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap" }}>
-        {["all", "buyer", "seller", "deleted"].map((s) => (
-          <button key={s} onClick={() => setFilter(s)}
-            style={{ padding: "6px 14px", borderRadius: 100, fontSize: 12, border: "1.5px solid", cursor: "pointer",
-              borderColor: filter === s ? "var(--orange)" : "var(--border)",
-              background: filter === s ? "var(--orange-light)" : "#fff",
-              color: filter === s ? "var(--orange)" : "var(--text2)" }}>
-            {s === "all" ? "Semua" : s === "buyer" ? "Buyer" : s === "seller" ? "Seller" : "Terhapus"}
-          </button>
-        ))}
-      </div>
-      <div style={{ overflow: "auto" }}>
-        <table className="table">
-          <thead><tr><th>Nama</th><th>Email</th><th>Role</th><th>Status</th><th>Aksi</th></tr></thead>
-          <tbody>
-            {visibleUsers.map((u) => (
-              <tr key={u.uid || u.id}>
-                <td style={{ fontWeight: 600 }}>{u.name || "-"}</td>
-                <td style={{ fontSize: 13 }}>{u.email || "-"}</td>
-                <td><span className="badge badge-info">{u.previousRole && u.role === "deleted" ? u.previousRole : u.role}</span></td>
-                <td style={{ fontSize: 13 }}>{u.status || "active"}</td>
-                <td>
-                  {u.role === "buyer" || u.role === "seller" ? (
-                    <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                      {u.role === "seller" && u.status !== "active" && u.status !== "approved" && (
-                        <button className="btn-primary btn-sm" onClick={() => approveSeller(u)}>Approve Seller</button>
-                      )}
-                      <button className="btn-ghost btn-sm" style={{ color: "#EF4444", borderColor: "#EF4444" }} onClick={() => deleteAccount(u)}>Hapus Akun</button>
-                    </div>
-                  ) : <span style={{ fontSize: 12, color: "var(--text3)" }}>Tidak ada aksi</span>}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
       </div>
     </div>
   );
@@ -2442,7 +1691,6 @@ function AdminOrders({ orders, createNotif }) {
     await updateDoc(doc(db, "orders", o.id), { statusPembayaran: "sudah_dibayar", statusPesanan: "pesanan_masuk", showToSeller: true, updatedAt: serverTimestamp() });
     await setDoc(doc(db, "seller_wallets", o.sellerId), { sellerId: o.sellerId, saldoTersedia: increment(o.sellerAmount), totalPenjualan: increment(o.sellerAmount) }, { merge: true });
     await addDoc(collection(db, "wallet_transactions"), { sellerId: o.sellerId, orderId: o.id, amount: o.sellerAmount, type: "income", createdAt: serverTimestamp() });
-    await autoDeductCommissionBills(o.sellerId, createNotif);
     await createNotif({ role: "seller", userId: o.sellerId, type: "payment_approved", title: "Pesanan Sudah Dibayar", message: `Pesanan ${o.productName} sudah dibayar. Saldo bersih ${rupiah(o.sellerAmount)}`, orderId: o.id });
     alert("Pembayaran disetujui");
   }
@@ -2454,6 +1702,12 @@ function AdminOrders({ orders, createNotif }) {
     alert("Pembayaran ditolak");
   }
 
+  async function confirmPickup(o) {
+    await updateDoc(doc(db, "orders", o.id), { statusPesanan: "selesai", pickupConfirmedAt: serverTimestamp(), updatedAt: serverTimestamp() });
+    await createNotif({ role: "buyer", userId: o.buyerId, type: "pickup_confirmed", title: "Pesanan Diambil", message: `Pesanan ${o.productName} sudah dikonfirmasi. Silakan beri ulasan bintang dan komentar.`, orderId: o.id });
+    await createNotif({ role: "seller", userId: o.sellerId, type: "pickup_confirmed", title: "Ambil di Tempat Dikonfirmasi", message: `Pesanan ${o.productName} sudah dikonfirmasi admin.`, orderId: o.id });
+    alert("Pesanan ambil di tempat dikonfirmasi");
+  }
 
   return (
     <div>
@@ -2513,8 +1767,10 @@ function AdminOrders({ orders, createNotif }) {
                 <button className="btn-ghost btn-sm" style={{ color: "#EF4444", borderColor: "#EF4444" }} onClick={() => reject(o)}>✕ Tolak</button>
               </div>
             )}
-            {o.shippingType === "pickup" && o.statusPesanan !== "selesai" && (
-              <div style={{ marginTop: 12, fontSize: 12, color: "var(--text3)" }}>Konfirmasi ambil di tempat dilakukan oleh seller setelah pembeli datang.</div>
+            {o.shippingType === "pickup" && !o.pickupConfirmedAt && o.statusPesanan !== "selesai" && (
+              <div style={{ marginTop: 12 }}>
+                <button className="btn-primary btn-sm" onClick={() => confirmPickup(o)}>✅ Konfirmasi Pembeli Sudah Datang</button>
+              </div>
             )}
           </div>
         );
@@ -2528,44 +1784,8 @@ function AdminWithdraw({ withdrawals }) {
   const filtered = filter === "all" ? withdrawals : withdrawals.filter((w) => w.status === filter);
 
   async function updateStatus(w, status) {
-    if (w.status === status) return;
-    if (w.status === "paid" || w.status === "rejected") {
-      alert("Penarikan ini sudah final dan tidak bisa diubah lagi.");
-      return;
-    }
-
-    const amount = Number(w.amount || 0);
-    const batch = writeBatch(db);
-    const withdrawalRef = doc(db, "withdrawals", w.id);
-    const walletRef = doc(db, "seller_wallets", w.sellerId);
-    const txRef = doc(collection(db, "wallet_transactions"));
-
-    batch.update(withdrawalRef, { status, updatedAt: serverTimestamp() });
-
-    if (status === "approved") {
-      batch.update(withdrawalRef, { approvedAt: serverTimestamp() });
-      batch.set(txRef, { sellerId: w.sellerId, withdrawalId: w.id, type: "withdraw_approved", amount, note: "Penarikan disetujui admin", createdAt: serverTimestamp() });
-    }
-
-    if (status === "paid") {
-      batch.update(walletRef, { saldoTertahan: increment(-amount), totalDitarik: increment(amount), updatedAt: serverTimestamp() });
-      batch.update(withdrawalRef, { paidAt: serverTimestamp() });
-      batch.set(txRef, { sellerId: w.sellerId, withdrawalId: w.id, type: "withdraw_paid", amount, note: "Penarikan berhasil dibayarkan", createdAt: serverTimestamp() });
-    }
-
-    if (status === "rejected") {
-      batch.update(walletRef, { saldoTersedia: increment(amount), saldoTertahan: increment(-amount), updatedAt: serverTimestamp() });
-      batch.update(withdrawalRef, { rejectedAt: serverTimestamp() });
-      batch.set(txRef, { sellerId: w.sellerId, withdrawalId: w.id, type: "withdraw_rejected_return", amount, note: "Penarikan ditolak/cancel, saldo dikembalikan ke saldo tersedia", createdAt: serverTimestamp() });
-    }
-
-    try {
-      await batch.commit();
-      alert(status === "rejected" ? "Penarikan ditolak dan saldo dikembalikan" : "Status penarikan diubah");
-    } catch (error) {
-      console.error("Gagal mengubah status penarikan:", error);
-      alert("Gagal mengubah status penarikan. Coba lagi.");
-    }
+    await updateDoc(doc(db, "withdrawals", w.id), { status, updatedAt: serverTimestamp() });
+    alert("Status penarikan diubah");
   }
 
   return (
@@ -2626,43 +1846,18 @@ function AdminWithdraw({ withdrawals }) {
 
 function PaymentSetting({ paymentSetting }) {
   const [form, setForm] = useState(paymentSetting || {});
-  const [qrisFile, setQrisFile] = useState(null);
-  const [qrisPreview, setQrisPreview] = useState(paymentSetting?.qrisUrl || "");
   const [loading, setLoading] = useState(false);
-
-  useEffect(() => {
-    setForm(paymentSetting || {});
-    setQrisPreview(paymentSetting?.qrisUrl || "");
-  }, [paymentSetting]);
-
-  function handleQrisFile(e) {
-    const f = e.target.files?.[0];
-    if (!f) return;
-    if (!["image/jpeg", "image/png", "image/webp"].includes(f.type)) { alert("Format QRIS harus JPG, PNG, atau WEBP"); return; }
-    if (f.size > 1024 * 1024) { alert("Ukuran QRIS maksimal 1MB"); return; }
-    setQrisFile(f);
-    setQrisPreview(URL.createObjectURL(f));
-  }
 
   async function save(e) {
     e.preventDefault(); setLoading(true);
-    try {
-      let qrisUrl = form.qrisUrl || "";
-      if (qrisFile) qrisUrl = await uploadImageToCloudinary(qrisFile);
-      await setDoc(doc(db, "admin_settings", "payment"), { ...form, qrisUrl, updatedAt: serverTimestamp() });
-      setForm((prev) => ({ ...prev, qrisUrl }));
-      setQrisFile(null);
-      alert("Rekening dan QRIS admin disimpan");
-    } catch (err) {
-      alert(err.message || "Gagal menyimpan pengaturan pembayaran");
-    }
-    setLoading(false);
+    await setDoc(doc(db, "admin_settings", "payment"), { ...form, updatedAt: serverTimestamp() });
+    setLoading(false); alert("Rekening pembayaran disimpan");
   }
 
   return (
     <div>
-      <div style={{ fontSize: 18, fontWeight: 700, marginBottom: 20 }}>💳 Pengaturan Rekening & QRIS Admin</div>
-      <div className="card" style={{ maxWidth: 520 }}>
+      <div style={{ fontSize: 18, fontWeight: 700, marginBottom: 20 }}>💳 Pengaturan Rekening Pembayaran</div>
+      <div className="card" style={{ maxWidth: 480 }}>
         <form onSubmit={save} style={{ display: "flex", flexDirection: "column", gap: 14 }}>
           <div className="form-group">
             <label>Nama Bank</label>
@@ -2676,17 +1871,7 @@ function PaymentSetting({ paymentSetting }) {
             <label>Atas Nama</label>
             <input className="form-input" placeholder="Nama pemegang rekening" value={form.accountHolder || ""} onChange={(e) => setForm({ ...form, accountHolder: e.target.value })} required />
           </div>
-          <div className="form-group">
-            <label>Foto QRIS Admin</label>
-            <input className="form-input" type="file" accept="image/jpeg,image/png,image/webp" onChange={handleQrisFile} style={{ padding: 8 }} />
-            {qrisPreview && (
-              <div style={{ marginTop: 10 }}>
-                <img src={qrisPreview} alt="Preview QRIS" style={{ width: 220, maxWidth: "100%", borderRadius: 12, border: "1px solid var(--border)", background: "#fff" }} />
-              </div>
-            )}
-            <div style={{ fontSize: 12, color: "var(--text3)", marginTop: 6 }}>QRIS hanya milik admin dan hanya tampil saat buyer memilih pembayaran Scan QRIS.</div>
-          </div>
-          <button type="submit" className="btn-primary" disabled={loading}>{loading ? "Menyimpan..." : "Simpan Rekening & QRIS"}</button>
+          <button type="submit" className="btn-primary" disabled={loading}>{loading ? "Menyimpan..." : "Simpan Rekening"}</button>
         </form>
       </div>
     </div>
@@ -2775,12 +1960,12 @@ function CreateSubAdmin() {
 const NOTIF_ICONS = {
   seller_register: "🧑‍💼", user_register: "👤", order_new: "🛒", order_placed: "✅",
   order_update: "📦", order_done: "🎉", payment_proof: "📄", payment_proof_sent: "📤",
-  payment_approved: "✅", payment_rejected: "❌", product_new: "📦", withdraw_new: "💸", commission_bill: "💸", commission_proof: "🧾", commission_approved: "✅", commission_cancelled: "❌", commission_auto_paid: "⚡",
+  payment_approved: "✅", payment_rejected: "❌", product_new: "📦", withdraw_new: "💸",
 };
 const NOTIF_COLORS = {
   seller_register: "#6366F1", user_register: "#8B5CF6", order_new: "#EE4D2D", order_placed: "#10B981",
   order_update: "#F59E0B", order_done: "#10B981", payment_proof: "#3B82F6", payment_proof_sent: "#3B82F6",
-  payment_approved: "#10B981", payment_rejected: "#EF4444", product_new: "#F59E0B", withdraw_new: "#EE4D2D", commission_bill: "#EF4444", commission_proof: "#F59E0B", commission_approved: "#10B981", commission_cancelled: "#EF4444", commission_auto_paid: "#10B981",
+  payment_approved: "#10B981", payment_rejected: "#EF4444", product_new: "#F59E0B", withdraw_new: "#EE4D2D",
 };
 
 function timeAgo(ts) {
@@ -2794,225 +1979,11 @@ function timeAgo(ts) {
   return d.toLocaleDateString("id-ID", { day: "numeric", month: "short", year: "numeric" });
 }
 
-
-/* ─── LIVE CHAT BUYER–SELLER ───────────────────────── */
-async function startChatWithSeller(product, user, profile) {
-  if (!user || !profile) return alert("Login sebagai pembeli dulu untuk chat seller.");
-  if (!product?.sellerId) return alert("Data seller tidak ditemukan.");
-  if (product.sellerId === user.uid) return alert("Ini produk toko kamu sendiri.");
-  const chatId = [user.uid, product.sellerId].sort().join("_");
-  await setDoc(doc(db, "chats", chatId), {
-    buyerId: profile.role === "buyer" ? user.uid : null,
-    sellerId: product.sellerId,
-    participants: [user.uid, product.sellerId],
-    buyerName: profile.name || "Buyer",
-    sellerName: product.sellerName || "Seller",
-    productId: product.id || null,
-    productName: product.productName || "Produk",
-    lastMessage: "Chat dimulai",
-    lastMessageAt: serverTimestamp(),
-    updatedAt: serverTimestamp(),
-  }, { merge: true });
-  alert("Chat dengan seller sudah dibuat. Buka menu Chat untuk mengirim pesan.");
-}
-
-function ChatCenter({ user, profile, createNotif }) {
-  const [chats, setChats] = useState([]);
-  const [activeChat, setActiveChat] = useState(null);
-  const [messages, setMessages] = useState([]);
-  const [text, setText] = useState("");
-  const [busy, setBusy] = useState(false);
-  const firstMsgLoadRef = useRef(true);
-
-  useEffect(() => {
-    if (!user) return;
-    const unsub = onSnapshot(collection(db, "chats"), (snap) => {
-      const data = snap.docs
-        .map((d) => ({ id: d.id, ...d.data() }))
-        .filter((c) => Array.isArray(c.participants) && c.participants.includes(user.uid))
-        .sort((a, b) => getMillis(b.updatedAt || b.lastMessageAt) - getMillis(a.updatedAt || a.lastMessageAt));
-      setChats(data);
-      setActiveChat((prev) => prev || data[0] || null);
-    });
-    return () => unsub();
-  }, [user]);
-
-  useEffect(() => {
-    if (!activeChat?.id) { setMessages([]); return; }
-    firstMsgLoadRef.current = true;
-    const unsub = onSnapshot(collection(db, "chats", activeChat.id, "messages"), (snap) => {
-      const data = snap.docs
-        .map((d) => ({ id: d.id, ...d.data() }))
-        .sort((a, b) => getMillis(a.createdAt) - getMillis(b.createdAt));
-      if (!firstMsgLoadRef.current && data.some((m) => m.senderId !== user.uid && !messages.find((old) => old.id === m.id))) {
-        playOrderSound();
-      }
-      firstMsgLoadRef.current = false;
-      setMessages(data);
-    });
-    return () => unsub();
-  }, [activeChat?.id, user?.uid]);
-
-  async function sendMessage(e) {
-    e.preventDefault();
-    const value = text.trim();
-    if (!value || !activeChat?.id || busy) return;
-    setBusy(true);
-    try {
-      const receiverId = activeChat.participants?.find((id) => id !== user.uid);
-      await addDoc(collection(db, "chats", activeChat.id, "messages"), {
-        chatId: activeChat.id,
-        senderId: user.uid,
-        senderName: profile?.name || "User",
-        receiverId: receiverId || null,
-        text: value,
-        createdAt: serverTimestamp(),
-      });
-      await setDoc(doc(db, "chats", activeChat.id), {
-        lastMessage: value,
-        lastSenderId: user.uid,
-        lastMessageAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
-      }, { merge: true });
-      if (receiverId && createNotif) {
-        await createNotif({ role: "chat", userId: receiverId, type: "chat_message", title: "Pesan Baru", message: `${profile?.name || "User"}: ${value.slice(0, 80)}`, chatId: activeChat.id });
-      }
-      setText("");
-    } catch (err) {
-      alert("Gagal mengirim pesan. Coba lagi.");
-    }
-    setBusy(false);
-  }
-
-  return (
-    <div className="page-container" style={{ maxWidth: 1100 }}>
-      <div style={{ fontSize: 22, fontWeight: 800, marginBottom: 16 }}>💬 Live Chat</div>
-      <div style={{ display: "grid", gridTemplateColumns: "minmax(240px, 320px) 1fr", gap: 14 }} className="chat-layout-wrap">
-        <div className="card" style={{ padding: 0, overflow: "hidden" }}>
-          <div style={{ padding: 14, fontWeight: 800, borderBottom: "1px solid var(--border)" }}>Daftar Chat</div>
-          {chats.length === 0 ? (
-            <div className="empty-state" style={{ padding: 24 }}>
-              <div className="empty-icon">💬</div>
-              <p>Belum ada chat.</p>
-            </div>
-          ) : chats.map((c) => {
-            const otherName = user.uid === c.sellerId ? (c.buyerName || "Buyer") : (c.sellerName || "Seller");
-            return (
-              <button key={c.id} onClick={() => setActiveChat(c)}
-                style={{ width: "100%", textAlign: "left", padding: 14, border: "none", borderBottom: "1px solid var(--border)", background: activeChat?.id === c.id ? "var(--orange-light)" : "#fff", cursor: "pointer" }}>
-                <div style={{ fontWeight: 800, fontSize: 14 }}>{otherName}</div>
-                <div style={{ fontSize: 12, color: "var(--text3)", marginTop: 3 }}>{c.productName || "Chat"}</div>
-                <div style={{ fontSize: 12, color: "var(--text2)", marginTop: 6, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{c.lastMessage || "-"}</div>
-              </button>
-            );
-          })}
-        </div>
-        <div className="card" style={{ minHeight: 460, display: "flex", flexDirection: "column", padding: 0, overflow: "hidden" }}>
-          {activeChat ? (
-            <>
-              <div style={{ padding: 14, borderBottom: "1px solid var(--border)", fontWeight: 800 }}>
-                {user.uid === activeChat.sellerId ? (activeChat.buyerName || "Buyer") : (activeChat.sellerName || "Seller")}
-                <div style={{ fontWeight: 400, fontSize: 12, color: "var(--text3)", marginTop: 2 }}>{activeChat.productName || "Chat produk"}</div>
-              </div>
-              <div style={{ flex: 1, padding: 14, background: "#F8FAFC", overflowY: "auto" }}>
-                {messages.length === 0 ? <p style={{ color: "var(--text3)", fontSize: 13 }}>Mulai percakapan...</p> : messages.map((m) => {
-                  const mine = m.senderId === user.uid;
-                  return (
-                    <div key={m.id} style={{ display: "flex", justifyContent: mine ? "flex-end" : "flex-start", marginBottom: 10 }}>
-                      <div style={{ maxWidth: "78%", padding: "9px 12px", borderRadius: 14, background: mine ? "var(--orange)" : "#fff", color: mine ? "#fff" : "var(--text)", boxShadow: "0 2px 8px rgba(0,0,0,.05)", fontSize: 14, lineHeight: 1.45 }}>
-                        {m.text}
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-              <form onSubmit={sendMessage} style={{ padding: 12, display: "flex", gap: 8, borderTop: "1px solid var(--border)" }}>
-                <input className="form-input" value={text} onChange={(e) => setText(e.target.value)} placeholder="Tulis pesan..." style={{ flex: 1 }} />
-                <button className="btn-primary" disabled={busy || !text.trim()}>{busy ? "..." : "Kirim"}</button>
-              </form>
-            </>
-          ) : (
-            <div className="empty-state" style={{ flex: 1 }}>
-              <div className="empty-icon">💬</div>
-              <p>Pilih chat untuk mulai percakapan.</p>
-            </div>
-          )}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function AdminCommissionSetting({ current, products = [] }) {
-  const [value, setValue] = useState(String(current?.globalCommissionPercent || 10));
-  const [busy, setBusy] = useState(false);
-
-  useEffect(() => { setValue(String(current?.globalCommissionPercent || 10)); }, [current?.globalCommissionPercent]);
-
-  async function save(applyAll = false) {
-    const percent = Number(String(value).replace(/[^0-9.]/g, ""));
-    if (!percent || percent < 0 || percent > 100) return alert("Masukkan komisi 1 sampai 100%.");
-    setBusy(true);
-    try {
-      await setDoc(doc(db, "admin_settings", "commission"), { globalCommissionPercent: percent, updatedAt: serverTimestamp() }, { merge: true });
-      if (applyAll) {
-        const batch = writeBatch(db);
-        products.filter((p) => !p.isDeleted).forEach((p) => {
-          batch.update(doc(db, "products", p.id), { commissionType: "percent", commissionValue: percent, updatedAt: serverTimestamp() });
-        });
-        await batch.commit();
-      }
-      alert(applyAll ? "Komisi global disimpan dan diterapkan ke semua produk." : "Komisi global disimpan untuk produk baru.");
-    } catch (err) {
-      alert("Gagal menyimpan komisi global.");
-    }
-    setBusy(false);
-  }
-
-  return (
-    <div className="card" style={{ maxWidth: 520 }}>
-      <div style={{ fontSize: 18, fontWeight: 800, marginBottom: 12 }}>📊 Pengaturan Komisi Global</div>
-      <p style={{ fontSize: 13, color: "var(--text2)", lineHeight: 1.6, marginBottom: 16 }}>Komisi dihitung per item produk. Contoh: harga Rp100.000, qty 2, komisi 10% = Rp20.000. Ongkir tidak kena komisi.</p>
-      <div className="form-group">
-        <label>Komisi Global Marketplace (%)</label>
-        <input className="form-input" value={value} onChange={(e) => setValue(e.target.value)} placeholder="10" />
-      </div>
-      <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-        <button className="btn-primary" disabled={busy} onClick={() => save(false)}>{busy ? "Menyimpan..." : "Simpan untuk Produk Baru"}</button>
-        <button className="btn-outline" disabled={busy} onClick={() => save(true)}>Terapkan ke Semua Produk</button>
-      </div>
-    </div>
-  );
-}
-
 function NotificationPage({ notifications }) {
-  const [notifBusy, setNotifBusy] = useState(false);
-  async function markRead(id) {
-    await updateDoc(doc(db, "notifications", id), { isRead: true, read: true });
-  }
-  async function deleteNotif(id) {
-    await deleteDoc(doc(db, "notifications", id));
-  }
-  async function deleteAll() {
-    if (!notifications.length || notifBusy) return;
-    if (!confirm("Hapus semua notifikasi?")) return;
-    setNotifBusy(true);
-    try {
-      await Promise.all(notifications.map((n) => deleteDoc(doc(db, "notifications", n.id))));
-    } finally {
-      setNotifBusy(false);
-    }
-  }
-  async function markAllRead() {
-    const unreadItems = notifications.filter((n) => !n.isRead && !n.read);
-    if (!unreadItems.length || notifBusy) return;
-    setNotifBusy(true);
-    try {
-      await Promise.all(unreadItems.map((n) => updateDoc(doc(db, "notifications", n.id), { isRead: true, read: true })));
-    } finally {
-      setNotifBusy(false);
-    }
-  }
+  async function markRead(id) { await updateDoc(doc(db, "notifications", id), { isRead: true }); }
+  async function deleteNotif(id) { await deleteDoc(doc(db, "notifications", id)); }
+  async function deleteAll() { for (const n of notifications) await deleteDoc(doc(db, "notifications", n.id)); }
+  async function markAllRead() { for (const n of notifications) await updateDoc(doc(db, "notifications", n.id), { isRead: true }); }
 
   const unread = notifications.filter((n) => !n.isRead);
   const sorted = [...notifications].sort((a, b) => {
@@ -3037,12 +2008,12 @@ function NotificationPage({ notifications }) {
           {notifications.length > 0 && (
             <div style={{ display: "flex", gap: 8 }}>
               {unread.length > 0 && (
-                <button className="btn-ghost btn-sm" onClick={markAllRead} disabled={notifBusy} style={{ fontSize: 12 }}>
-                  {notifBusy ? "Memproses..." : "✓ Tandai Semua Dibaca"}
+                <button className="btn-ghost btn-sm" onClick={markAllRead} style={{ fontSize: 12 }}>
+                  ✓ Tandai Semua Dibaca
                 </button>
               )}
-              <button className="btn-ghost btn-sm" onClick={deleteAll} disabled={notifBusy} style={{ fontSize: 12, color: "#EF4444", borderColor: "#FECACA" }}>
-                {notifBusy ? "Memproses..." : "🗑 Hapus Semua"}
+              <button className="btn-ghost btn-sm" onClick={deleteAll} style={{ fontSize: 12, color: "#EF4444", borderColor: "#FECACA" }}>
+                🗑 Hapus Semua
               </button>
             </div>
           )}
