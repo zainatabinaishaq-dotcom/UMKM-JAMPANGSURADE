@@ -508,8 +508,8 @@ export default function App() {
           onLogout={() => { signOut(auth); navGoTo("home"); }} />
       )}
       {page === "admin" && (profile?.role === "admin" || profile?.role === "sub_admin") && (
-        <AdminDashboard profile={profile} products={products} orders={orders} withdrawals={withdrawals}
-          paymentSetting={paymentSetting} manualBalance={manualBalance} wallets={wallets} createNotif={createNotif}
+        <AdminDashboard profile={profile || {}} products={products || []} orders={orders || []} withdrawals={withdrawals || []}
+          paymentSetting={paymentSetting || null} manualBalance={manualBalance || null} wallets={wallets || []} createNotif={createNotif}
           onLogout={() => { signOut(auth); navGoTo("home"); }} />
       )}
       {page === "notif" && user && (
@@ -1233,9 +1233,9 @@ function SellerDashboard({ user, profile, products = [], orders = [], wallets = 
             <div style={{ fontSize: 20, fontWeight: 700, marginBottom: 20 }}>Dashboard Toko 🏪</div>
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 14, marginBottom: 28 }}>
               {[
-                { label: "Total Produk", value: sellerProducts.length, icon: "📦", color: "#EE4D2D" },
+                { label: "Total Produk", value: safeProducts.length, icon: "📦", color: "#EE4D2D" },
                 { label: "Produk Aktif", value: sellerProducts.filter((p) => p?.status === "active").length, icon: "✅", color: "#10B981" },
-                { label: "Total Order", value: sellerOrders.length, icon: "🛒", color: "#3B82F6" },
+                { label: "Total Order", value: safeOrders.length, icon: "🛒", color: "#3B82F6" },
                 { label: "Saldo Tersedia", value: rupiah(wallet?.saldoTersedia || 0), icon: "💰", color: "#F59E0B" },
                 { label: "Total Penjualan", value: rupiah(wallet?.totalPenjualan || 0), icon: "📈", color: "#8B5CF6" },
               ].map((s) => (
@@ -1441,7 +1441,7 @@ function AddProduct({ user, profile, products = [], createNotif }) {
                     <td>
                       <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
                         <img src={p.imageUrl || ""} alt={p.productName} style={{ width: 40, height: 40, borderRadius: 6, objectFit: "cover" }} />
-                        <span style={{ fontWeight: 500, fontSize: 13 }}>{p.productName}</span>
+                        <span style={{ fontWeight: 500, fontSize: 13 }}>{p?.productName || "Tanpa Nama"}</span>
                       </div>
                     </td>
                     <td><span style={{ fontSize: 12 }}>{p.category}{p.subCategory ? ` / ${p.subCategory}` : ""}</span></td>
@@ -1552,12 +1552,16 @@ function Withdraw({ user, profile, wallet, createNotif }) {
 }
 
 /* ─── ADMIN DASHBOARD ────────────────────────── */
-function AdminDashboard({ profile, products, orders, withdrawals, paymentSetting, manualBalance, wallets, createNotif, onLogout }) {
+function AdminDashboard({ profile = {}, products = [], orders = [], withdrawals = [], paymentSetting = null, manualBalance = null, wallets = [], createNotif, onLogout }) {
   const [tab, setTab] = useState("order");
-  const autoBalance = wallets.reduce((sum, w) => sum + Number(w.saldoTersedia || 0), 0);
+  const safeProducts = Array.isArray(products) ? products : [];
+  const safeOrders = Array.isArray(orders) ? orders : [];
+  const safeWithdrawals = Array.isArray(withdrawals) ? withdrawals : [];
+  const safeWallets = Array.isArray(wallets) ? wallets : [];
+  const autoBalance = safeWallets.reduce((sum, w) => sum + Number(w?.saldoTersedia || 0), 0);
   const displayedBalance = manualBalance?.isManualBalanceActive ? Number(manualBalance.totalSellerBalanceManual || 0) : autoBalance;
 
-  const isAdmin = profile.role === "admin";
+  const isAdmin = profile?.role === "admin";
   const tabs = [
     { id: "order", label: "Order Masuk", icon: "🛒" },
     ...(isAdmin ? [
@@ -1595,9 +1599,9 @@ function AdminDashboard({ profile, products, orders, withdrawals, paymentSetting
       <div className="dash-content">
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 14, marginBottom: 24 }}>
           {[
-            { label: "Total Produk", value: sellerProducts.length, icon: "📦", color: "#EE4D2D" },
-            { label: "Total Order", value: sellerOrders.length, icon: "🛒", color: "#3B82F6" },
-            { label: "Penarikan", value: withdrawals.length, icon: "💸", color: "#F59E0B" },
+            { label: "Total Produk", value: safeProducts.length, icon: "📦", color: "#EE4D2D" },
+            { label: "Total Order", value: safeOrders.length, icon: "🛒", color: "#3B82F6" },
+            { label: "Penarikan", value: safeWithdrawals.length, icon: "💸", color: "#F59E0B" },
             { label: "Saldo Seller", value: rupiah(displayedBalance), icon: "💰", color: "#10B981" },
           ].map((s) => (
             <div key={s.label} className="stat-card">
@@ -1607,9 +1611,9 @@ function AdminDashboard({ profile, products, orders, withdrawals, paymentSetting
             </div>
           ))}
         </div>
-        {tab === "order" && <AdminOrders orders={orders} createNotif={createNotif} />}
-        {tab === "produk" && isAdmin && <AdminProducts products={products} />}
-        {tab === "withdraw" && isAdmin && <AdminWithdraw withdrawals={withdrawals} />}
+        {tab === "order" && <AdminOrders orders={safeOrders} createNotif={createNotif} />}
+        {tab === "produk" && isAdmin && <AdminProducts products={safeProducts} />}
+        {tab === "withdraw" && isAdmin && <AdminWithdraw withdrawals={safeWithdrawals} />}
         {tab === "payment" && isAdmin && <PaymentSetting paymentSetting={paymentSetting} />}
         {tab === "balance" && isAdmin && <ManualBalance />}
         {tab === "admins" && isAdmin && <CreateSubAdmin />}
@@ -1618,9 +1622,10 @@ function AdminDashboard({ profile, products, orders, withdrawals, paymentSetting
   );
 }
 
-function AdminProducts({ products }) {
+function AdminProducts({ products = [] }) {
+  products = Array.isArray(products) ? products : [];
   const [filter, setFilter] = useState("all");
-  const filtered = filter === "all" ? products : products.filter((p) => p.status === filter);
+  const filtered = filter === "all" ? products : products.filter((p) => p?.status === filter);
 
   async function approve(id) { await updateDoc(doc(db, "products", id), { status: "active" }); alert("Produk disetujui"); }
   async function reject(id) { await updateDoc(doc(db, "products", id), { status: "rejected" }); alert("Produk ditolak"); }
@@ -1657,13 +1662,13 @@ function AdminProducts({ products }) {
                 <tr key={p.id}>
                   <td>
                     <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
-                      <img src={p.imageUrl || ""} alt={p.productName} style={{ width: 44, height: 44, borderRadius: 6, objectFit: "cover" }} />
-                      <span style={{ fontWeight: 500, fontSize: 13 }}>{p.productName}</span>
+                      <img src={p?.imageUrl || "https://via.placeholder.com/44?text=No"} alt={p?.productName || "Produk"} style={{ width: 44, height: 44, borderRadius: 6, objectFit: "cover" }} />
+                      <span style={{ fontWeight: 500, fontSize: 13 }}>{p?.productName || "Tanpa Nama"}</span>
                     </div>
                   </td>
-                  <td style={{ fontSize: 13 }}>{p.sellerName}</td>
-                  <td style={{ color: "var(--orange)", fontWeight: 600 }}>{rupiah(p.price)}</td>
-                  <td style={{ fontSize: 12 }}>{p.commissionType === "percent" ? `${p.commissionValue}%` : rupiah(p.commissionValue)}</td>
+                  <td style={{ fontSize: 13 }}>{p?.sellerName || "-"}</td>
+                  <td style={{ color: "var(--orange)", fontWeight: 600 }}>{rupiah(p?.price || 0)}</td>
+                  <td style={{ fontSize: 12 }}>{p?.commissionType === "percent" ? `${p?.commissionValue || 0}%` : rupiah(p?.commissionValue || 0)}</td>
                   <td><span className={`badge ${s.cls}`}>{s.label}</span></td>
                   <td>
                     <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
@@ -1682,7 +1687,8 @@ function AdminProducts({ products }) {
   );
 }
 
-function AdminOrders({ orders, createNotif }) {
+function AdminOrders({ orders = [], createNotif }) {
+  orders = Array.isArray(orders) ? orders : [];
   const [filter, setFilter] = useState("all");
   const sortedOrders = sortNewest(orders);
   const filtered = filter === "all" ? sortedOrders : sortedOrders.filter((o) => o.statusPembayaran === filter || o.statusPesanan === filter);
@@ -1779,7 +1785,8 @@ function AdminOrders({ orders, createNotif }) {
   );
 }
 
-function AdminWithdraw({ withdrawals }) {
+function AdminWithdraw({ withdrawals = [] }) {
+  withdrawals = Array.isArray(withdrawals) ? withdrawals : [];
   const [filter, setFilter] = useState("all");
   const filtered = filter === "all" ? withdrawals : withdrawals.filter((w) => w.status === filter);
 
