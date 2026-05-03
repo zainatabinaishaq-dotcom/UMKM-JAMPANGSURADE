@@ -353,6 +353,10 @@ async function recomputeProductRating(productId) {
   }, { merge: true });
 }
 
+
+function scrollToTopSmooth() {
+  window.scrollTo({ top: 0, behavior: "smooth" });
+}
 export default function App() {
   const [user, setUser] = useState(null);
   const [profile, setProfile] = useState(null);
@@ -588,7 +592,7 @@ export default function App() {
   const cartCount = cart.reduce((s, i) => s + i.quantity, 0);
   const cartTotal = cart.reduce((s, i) => s + i.price * i.quantity, 0);
   const unreadNotif = notifications.filter((n) => !n.isRead).length;
-  const unreadChat = notifications.filter((n) => !n.isRead && n.type === "chat_message").length;
+  const unreadChat = notifications.filter(n => !n.isRead && n.type === "chat_message").length;
   const activeProducts = products.filter((p) => p.status === "active" && !p.isDeleted);
 
   if (loading) {
@@ -738,7 +742,7 @@ export default function App() {
           user={user}
           profile={profile}
           onClose={() => setShowCheckout(false)}
-          onSuccess={() => { setCart([]); setShowCheckout(false); navGoTo("buyer"); }}
+          onSuccess={() => { setCart([]); setShowCheckout(false); scrollToTopSmooth(); navGoTo("buyer"); }}
           createNotif={createNotif}
         />
       )}
@@ -779,7 +783,7 @@ export default function App() {
         <SellerDashboard user={user} profile={profile}
           products={products.filter((p) => p.sellerId === user.uid)}
           orders={orders.filter((o) => o.sellerId === user.uid)}
-          wallets={wallets} commissionBills={commissionBills} paymentSetting={paymentSetting} commissionSetting={commissionSetting} createNotif={createNotif}
+          wallets={wallets} commissionBills={commissionBills} paymentSetting={paymentSetting} commissionSetting={commissionSetting} chatUnread={unreadChat} createNotif={createNotif}
           onLogout={() => { signOut(auth); navGoTo("home"); }} />
       )}
       {page === "admin" && (profile?.role === "admin" || profile?.role === "sub_admin") && (
@@ -800,7 +804,7 @@ export default function App() {
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 32, marginBottom: 24 }}>
             <div>
               <div style={{ fontSize: 20, fontWeight: 800, color: "#fff", marginBottom: 12 }}>UMKM<span style={{ color: "var(--orange)" }}>Digital</span></div>
-              <p style={{ fontSize: 13, lineHeight: 1.7 }}>Marketplace digital untuk UMKM lokal Jampang Surade. Produk lokal berkualitas, pembayaran aman.</p>
+              <p style={{ fontSize: 13, lineHeight: 1.7 }}>Marketplace digital untuk UMKM lokal di sekitar anda. Produk lokal berkualitas, pembayaran aman.</p>
             </div>
             <div>
               <div style={{ color: "#fff", fontWeight: 600, marginBottom: 12 }}>Layanan Pelanggan</div>
@@ -815,7 +819,7 @@ export default function App() {
             </div>
           </div>
           <div style={{ borderTop: "1px solid #333", paddingTop: 20, textAlign: "center", fontSize: 12 }}>
-            © 2025 UMKM Digital Jampang Surade. Hak cipta dilindungi.
+            © 2025 UMKM Digital di sekitar anda. Hak cipta dilindungi.
           </div>
         </div>
       </footer>
@@ -891,7 +895,7 @@ function HomePage({ products, search, onProductClick, onAddToCart, user, profile
         <div className="hero-pattern" />
         <div className="hero-pattern2">🛍️</div>
         <h1>Belanja Produk UMKM<br />Lokal Berkualitas</h1>
-        <p>Temukan ribuan produk UMKM terbaik dari Jampang Surade. Dukung pengusaha lokal, belanja lebih hemat!</p>
+        <p>Temukan ribuan produk UMKM terbaik di sekitar anda. Dukung pengusaha lokal, belanja lebih hemat!</p>
         <div className="hero-cta" style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
           {!user ? (
             <>
@@ -1450,7 +1454,7 @@ function BuyerOrderCard({ order, createNotif, paymentSetting }) {
     if (order.receivedAt) return;
     const qty = Number(order.quantity || 1);
     const batch = writeBatch(db);
-    batch.update(doc(db, "orders", order.id), { statusPesanan: "selesai", receivedAt: serverTimestamp(), soldCounted: true, updatedAt: serverTimestamp() });
+    batch.update(doc(db, "orders", order.id), { statusPesanan: "selesai", updatedAt: new Date(), receivedAt: serverTimestamp(), soldCounted: true, updatedAt: serverTimestamp() });
     if (order.productId && !order.soldCounted) {
       batch.set(doc(db, "products", order.productId), { soldCount: increment(qty), totalSold: increment(qty), updatedAt: serverTimestamp() }, { merge: true });
     }
@@ -1582,7 +1586,7 @@ function BuyerProfile({ profile }) {
 }
 
 /* ─── SELLER DASHBOARD ───────────────────────── */
-function SellerDashboard({ user, profile, products, orders, wallets, commissionBills = [], paymentSetting, chatUnread = 0, createNotif, onLogout }) {
+function SellerDashboard({ user, profile, products, orders, wallets, commissionBills = [], paymentSetting, commissionSetting, chatUnread = 0, createNotif, onLogout }) {
   const [tab, setTab] = useState("beranda");
   const wallet = wallets.find((w) => w.sellerId === user.uid);
   const sellerCommissionBills = commissionBills.filter((b) => b.sellerId === user.uid);
@@ -1931,7 +1935,7 @@ function SellerOrders({ orders, createNotif }) {
 
   async function confirmPickup(o) {
     if (!confirm("Konfirmasi hanya setelah pembeli sudah datang dan mengambil pesanan. Lanjutkan?")) return;
-    await updateDoc(doc(db, "orders", o.id), { statusPesanan: "selesai", pickupConfirmedAt: serverTimestamp(), receivedAt: serverTimestamp(), updatedAt: serverTimestamp() });
+    await updateDoc(doc(db, "orders", o.id), { statusPesanan: "selesai", updatedAt: new Date(), pickupConfirmedAt: serverTimestamp(), receivedAt: serverTimestamp(), updatedAt: serverTimestamp() });
     await createNotif({ role: "buyer", userId: o.buyerId, type: "order_done", title: "Pesanan Diambil", message: `Pesanan ${o.productName} sudah dikonfirmasi seller. Silakan beri ulasan bintang dan komentar.`, orderId: o.id });
     alert("Pesanan ambil di tempat sudah dikonfirmasi. Buyer akan diminta beri ulasan.");
   }
@@ -2614,7 +2618,7 @@ function AdminOrders({ orders, createNotif }) {
                 borderColor: filter === s ? "var(--orange)" : "var(--border)",
                 background: filter === s ? "var(--orange-light)" : "#fff",
                 color: filter === s ? "var(--orange)" : "var(--text2)" }}>
-              {info.label}{(s === "semua" ? sortedOrders.length : sortedOrders.filter((o) => o.statusPesanan === s).length) > 0 ? ` (${s === "semua" ? sortedOrders.length : sortedOrders.filter((o) => o.statusPesanan === s).length})` : ""}
+              {info.label}{(s === "all" ? sortedOrders.length : sortedOrders.filter((o) => o.statusPembayaran === s || o.statusPesanan === s).length) > 0 ? ` (${s === "all" ? sortedOrders.length : sortedOrders.filter((o) => o.statusPembayaran === s || o.statusPesanan === s).length})` : ""}
             </button>
           );
         })}
@@ -2736,7 +2740,7 @@ function AdminWithdraw({ withdrawals }) {
                 borderColor: filter === s ? "var(--orange)" : "var(--border)",
                 background: filter === s ? "var(--orange-light)" : "#fff",
                 color: filter === s ? "var(--orange)" : "var(--text2)" }}>
-              {info.label}{(s === "semua" ? sortedOrders.length : sortedOrders.filter((o) => o.statusPesanan === s).length) > 0 ? ` (${s === "semua" ? sortedOrders.length : sortedOrders.filter((o) => o.statusPesanan === s).length})` : ""}
+              {info.label}{(s === "all" ? withdrawals.length : withdrawals.filter((w) => w.status === s).length) > 0 ? ` (${s === "all" ? withdrawals.length : withdrawals.filter((w) => w.status === s).length})` : ""}
             </button>
           );
         })}
