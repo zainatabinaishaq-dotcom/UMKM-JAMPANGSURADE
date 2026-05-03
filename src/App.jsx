@@ -388,6 +388,36 @@ async function recomputeProductRating(productId) {
 }
 
 
+
+async function resolveCheckoutProduct(item) {
+  const itemId = String(item?.id || item?.productId || "");
+  let merged = { ...(item || {}) };
+
+  if (itemId && (!merged.sellerId || !merged.price || !merged.productName)) {
+    try {
+      const productSnap = await getDoc(doc(db, "products", itemId));
+      if (productSnap.exists()) {
+        merged = { id: productSnap.id, ...productSnap.data(), ...merged };
+        // Keep fresh product fields when cart contains empty/invalid values.
+        const fresh = productSnap.data();
+        if (!merged.sellerId && fresh.sellerId) merged.sellerId = fresh.sellerId;
+        if (!merged.productName && fresh.productName) merged.productName = fresh.productName;
+        if (!merged.imageUrl && fresh.imageUrl) merged.imageUrl = fresh.imageUrl;
+        if (!Number(merged.price || 0) && Number(fresh.price || 0)) merged.price = fresh.price;
+        if (!merged.sellerName && fresh.sellerName) merged.sellerName = fresh.sellerName;
+        if (!merged.sellerMapLink && fresh.sellerMapLink) merged.sellerMapLink = fresh.sellerMapLink;
+        if (!merged.sellerAddress && fresh.sellerAddress) merged.sellerAddress = fresh.sellerAddress;
+        if (!merged.commissionType && fresh.commissionType) merged.commissionType = fresh.commissionType;
+        if (!merged.commissionValue && fresh.commissionValue) merged.commissionValue = fresh.commissionValue;
+      }
+    } catch (error) {
+      console.error("Gagal mengambil ulang data produk checkout:", error);
+    }
+  }
+
+  return merged;
+}
+
 function scrollToTopSmooth() {
   window.scrollTo({ top: 0, behavior: "smooth" });
 }
@@ -820,10 +850,10 @@ export default function App() {
       {page === "seller" && profile?.role === "seller" && (
         <SellerDashboard user={user} profile={profile}
           products={products.filter((p) => p.sellerId === user.uid)}
-          orders={orders.filter((o) => {
+          orders={sortOrdersByStage(orders.filter((o) => {
             const sellerProductIds = new Set(products.filter((p) => p.sellerId === user.uid).map((p) => p.id));
             return o.sellerId === user.uid || sellerProductIds.has(o.productId);
-          })}
+          }))}
           wallets={wallets} commissionBills={commissionBills} paymentSetting={paymentSetting} commissionSetting={commissionSetting} chatUnread={unreadChat} createNotif={createNotif}
           onLogout={() => { signOut(auth); navGoTo("home"); }} />
       )}
@@ -1326,8 +1356,24 @@ function CheckoutModal({ cart, user, profile, onClose, onSuccess, createNotif })
         }
       }
 
-      for (const item of cart) {
-        const productTotal = Number(item.price) * Number(item.quantity);
+      let createdCount = 0;
+      const createdOrders = [];
+
+      for (const rawItem of cart) {
+        const item = await resolveCheckoutProduct(rawItem);
+        const safeSellerId = String(item.sellerId || item.uid || item.ownerId || "");
+        const safeProductId = String(item.id || item.productId || "");
+        const safeProductName = String(item.productName || item.name || "Produk");
+        const safeProductImage = String(item.imageUrl || item.productImage || "");
+        const safeQuantity = Math.max(1, Number(rawItem.quantity || item.quantity || 1));
+        const safePrice = Number(item.price || 0);
+
+        if (!user?.uid) throw new Error("Sesi login tidak valid. Silakan login ulang.");
+        if (!safeProductId) throw new Error("Data produk tidak lengkap. Hapus produk dari keranjang lalu masukkan produk lagi.");
+        if (!safeSellerId) throw new Error("Data seller produk tidak lengkap. Coba hapus dari keranjang lalu tambah ulang produk. Kalau masih gagal, seller harus upload ulang produk.");
+        if (!safePrice || safePrice <= 0) throw new Error("Harga produk tidak valid. Hubungi seller.");
+
+        const productTotal = safePrice * safeQuantity;
         const adminFee = calcCommission(productTotal, item.commissionType, item.commissionValue);
         let shippingCost = 0, distanceKm = 0, courierName = "Ambil di Tempat", courierService = "Gratis", statusPembayaran = "menunggu_pembayaran", statusPesanan = "menunggu_pembayaran";
         if (form.shippingType === "pickup") { statusPembayaran = "tunai"; statusPesanan = "pesanan_masuk"; }
@@ -1335,29 +1381,70 @@ function CheckoutModal({ cart, user, profile, onClose, onSuccess, createNotif })
         if (needsAddress) { courierName = form.shippingType.toUpperCase(); courierService = "Penjual sedang cek ongkir"; statusPembayaran = "menunggu_ongkir"; statusPesanan = "menunggu_ongkir"; }
         const totalAmount = productTotal + shippingCost;
         const sellerAmount = productTotal - adminFee + shippingCost;
-        const ref = await addDoc(collection(db, "orders"), {
-          buyerId: user.uid, sellerId: item.sellerId, sellerName: item.sellerName || "", productId: item.id, productName: item.productName, productImage: item.imageUrl,
-          buyerName: form.buyerName, buyerWhatsapp: form.buyerWhatsapp, buyerAddress: form.buyerAddress,
-          buyerMapsLink: form.buyerMapsLink || "", buyerVillage: form.buyerVillage || "", buyerDistrict: form.buyerDistrict || "", buyerRegency: form.buyerRegency || "",
-          sellerMapLink: item.sellerMapLink || "", sellerAddress: item.sellerAddress || "", quantity: item.quantity,
-          productTotal, shippingType: form.shippingType, paymentMethod: form.paymentMethod, shippingCost, distanceKm, courierName, courierService,
-          totalAmount, adminFee, sellerAmount, statusPembayaran, statusPesanan, proofSubmitted: false, reviewSubmitted: false,
-          pendingShippingQuote: needsSellerQuote, showToSeller: true, createdAt: serverTimestamp(), updatedAt: serverTimestamp(),
-        });
+
+        const orderPayload = {
+          buyerId: user.uid,
+          sellerId: safeSellerId,
+          sellerName: String(item.sellerName || ""),
+          productId: safeProductId,
+          productName: safeProductName,
+          productImage: safeProductImage,
+          buyerName: String(form.buyerName || profile?.name || ""),
+          buyerWhatsapp: String(form.buyerWhatsapp || profile?.whatsapp || ""),
+          buyerAddress: String(form.buyerAddress || ""),
+          buyerMapsLink: String(form.buyerMapsLink || ""),
+          buyerVillage: String(form.buyerVillage || ""),
+          buyerDistrict: String(form.buyerDistrict || ""),
+          buyerRegency: String(form.buyerRegency || ""),
+          sellerMapLink: String(item.sellerMapLink || ""),
+          sellerAddress: String(item.sellerAddress || ""),
+          quantity: safeQuantity,
+          productTotal,
+          shippingType: String(form.shippingType || "pickup"),
+          paymentMethod: String(form.paymentMethod || "transfer"),
+          shippingCost,
+          distanceKm,
+          courierName,
+          courierService,
+          totalAmount,
+          adminFee,
+          sellerAmount,
+          statusPembayaran,
+          statusPesanan,
+          proofSubmitted: false,
+          reviewSubmitted: false,
+          pendingShippingQuote: needsSellerQuote,
+          showToSeller: true,
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        };
+
+        const ref = await addDoc(collection(db, "orders"), orderPayload);
+        createdCount += 1;
+        createdOrders.push({ id: ref.id, ...orderPayload });
+
         if (form.paymentMethod === "cash" && !needsSellerQuote) {
           try {
-            await createCashCommissionBill(ref.id, { sellerId: item.sellerId, sellerName: item.sellerName || "", productName: item.productName, adminFee }, createNotif);
+            await createCashCommissionBill(ref.id, { sellerId: safeSellerId, sellerName: String(item.sellerName || ""), productName: safeProductName, adminFee }, createNotif);
           } catch (error) {
             console.error("Gagal membuat tagihan komisi tunai:", error);
           }
         }
-        await createNotif({ role: "admin", type: "order_new", title: "Order Baru Masuk", message: `${form.buyerName} memesan ${item.productName} senilai ${rupiah(totalAmount)}`, orderId: ref.id });
-        await createNotif({ role: "seller", userId: item.sellerId, type: needsSellerQuote ? "shipping_quote_needed" : "order_new", title: needsSellerQuote ? "Cek Ongkir Pesanan" : "Ada Pesanan Baru! 🎉", message: needsSellerQuote ? `Pembeli memilih ${courierName}. Input ongkir untuk ${item.productName}.` : `Pesanan baru: ${item.productName} (${item.quantity} pcs).`, orderId: ref.id });
-        await createNotif({ role: "buyer", userId: user.uid, type: "order_placed", title: "Pesanan Berhasil Dibuat", message: needsSellerQuote ? `Pesanan ${item.productName} dibuat. Penjual sedang menghitung ongkir.` : `Pesanan ${item.productName} berhasil dibuat.`, orderId: ref.id });
+
+        await createNotif({ role: "admin", type: "order_new", title: "Order Baru Masuk", message: `${form.buyerName} memesan ${safeProductName} senilai ${rupiah(totalAmount)}`, orderId: ref.id });
+        await createNotif({ role: "seller", userId: safeSellerId, type: needsSellerQuote ? "shipping_quote_needed" : "order_new", title: needsSellerQuote ? "Cek Ongkir Pesanan" : "Ada Pesanan Baru! 🎉", message: needsSellerQuote ? `Pembeli memilih ${courierName}. Input ongkir untuk ${safeProductName}.` : `Pesanan baru: ${safeProductName} (${safeQuantity} pcs).`, orderId: ref.id });
+        await createNotif({ role: "buyer", userId: user.uid, type: "order_placed", title: "Pesanan Berhasil Dibuat", message: needsSellerQuote ? `Pesanan ${safeProductName} dibuat. Penjual sedang menghitung ongkir.` : `Pesanan ${safeProductName} berhasil dibuat.`, orderId: ref.id });
       }
+
+      if (createdCount <= 0) throw new Error("Pesanan belum berhasil dibuat. Coba lagi.");
       onSuccess();
-    } catch (err) { setError(err.message || "Checkout gagal. Coba lagi."); }
-    setLoading(false);
+    } catch (err) {
+      console.error("Checkout gagal:", err);
+      setError(err.message || "Checkout gagal. Coba lagi.");
+      alert(err.message || "Checkout gagal. Coba lagi.");
+    } finally {
+      setLoading(false);
+    }
   }
 
   return (
