@@ -384,7 +384,11 @@ export default function App() {
   const notificationSoundReadyRef = useRef(false);
 
   async function createNotif(data) {
-    await addDoc(collection(db, "notifications"), { ...data, isRead: false, createdAt: serverTimestamp() });
+    try {
+      await addDoc(collection(db, "notifications"), { ...data, isRead: false, createdAt: serverTimestamp() });
+    } catch (error) {
+      console.error("Gagal membuat notifikasi:", error);
+    }
   }
 
   useEffect(() => {
@@ -1273,8 +1277,12 @@ function CheckoutModal({ cart, user, profile, onClose, onSuccess, createNotif })
         updatedAt: new Date().toISOString(),
       };
       if (needsAddress || form.shippingType === "same_day") {
-        localStorage.setItem(`umkm_last_shipping_address_${user.uid}`, JSON.stringify(addressToSave));
-        await setDoc(doc(db, "users", user.uid), { savedShippingAddress: addressToSave }, { merge: true });
+        try { localStorage.setItem(`umkm_last_shipping_address_${user.uid}`, JSON.stringify(addressToSave)); } catch {}
+        try {
+          await setDoc(doc(db, "users", user.uid), { savedShippingAddress: addressToSave }, { merge: true });
+        } catch (error) {
+          console.error("Gagal menyimpan alamat otomatis:", error);
+        }
       }
 
       for (const item of cart) {
@@ -1296,7 +1304,11 @@ function CheckoutModal({ cart, user, profile, onClose, onSuccess, createNotif })
           pendingShippingQuote: needsSellerQuote, showToSeller: true, createdAt: serverTimestamp(), updatedAt: serverTimestamp(),
         });
         if (form.paymentMethod === "cash" && !needsSellerQuote) {
-          await createCashCommissionBill(ref.id, { sellerId: item.sellerId, sellerName: item.sellerName || "", productName: item.productName, adminFee }, createNotif);
+          try {
+            await createCashCommissionBill(ref.id, { sellerId: item.sellerId, sellerName: item.sellerName || "", productName: item.productName, adminFee }, createNotif);
+          } catch (error) {
+            console.error("Gagal membuat tagihan komisi tunai:", error);
+          }
         }
         await createNotif({ role: "admin", type: "order_new", title: "Order Baru Masuk", message: `${form.buyerName} memesan ${item.productName} senilai ${rupiah(totalAmount)}`, orderId: ref.id });
         await createNotif({ role: "seller", userId: item.sellerId, type: needsSellerQuote ? "shipping_quote_needed" : "order_new", title: needsSellerQuote ? "Cek Ongkir Pesanan" : "Ada Pesanan Baru! 🎉", message: needsSellerQuote ? `Pembeli memilih ${courierName}. Input ongkir untuk ${item.productName}.` : `Pesanan baru: ${item.productName} (${item.quantity} pcs).`, orderId: ref.id });
@@ -1454,7 +1466,7 @@ function BuyerOrderCard({ order, createNotif, paymentSetting }) {
     if (order.receivedAt) return;
     const qty = Number(order.quantity || 1);
     const batch = writeBatch(db);
-    batch.update(doc(db, "orders", order.id), { statusPesanan: "selesai", updatedAt: new Date(), receivedAt: serverTimestamp(), soldCounted: true, updatedAt: serverTimestamp() });
+    batch.update(doc(db, "orders", order.id), { statusPesanan: "selesai", receivedAt: serverTimestamp(), soldCounted: true, updatedAt: serverTimestamp() });
     if (order.productId && !order.soldCounted) {
       batch.set(doc(db, "products", order.productId), { soldCount: increment(qty), totalSold: increment(qty), updatedAt: serverTimestamp() }, { merge: true });
     }
@@ -1917,7 +1929,11 @@ function SellerOrders({ orders, createNotif }) {
       updatedAt: serverTimestamp()
     });
     if (o.paymentMethod === "cash") {
-      await createCashCommissionBill(o.id, { sellerId: o.sellerId, sellerName: o.sellerName || "", productName: o.productName, adminFee: o.adminFee }, createNotif);
+      try {
+        await createCashCommissionBill(o.id, { sellerId: o.sellerId, sellerName: o.sellerName || "", productName: o.productName, adminFee: o.adminFee }, createNotif);
+      } catch (error) {
+        console.error("Gagal membuat tagihan komisi tunai:", error);
+      }
     }
     await createNotif({ role: "buyer", userId: o.buyerId, type: "shipping_quote_ready", title: "Ongkir Sudah Dihitung", message: `Ongkir ${o.productName} adalah ${rupiah(cost)}. Silakan lanjutkan pembayaran.`, orderId: o.id });
     alert("Ongkir dikirim ke buyer");
@@ -1935,7 +1951,7 @@ function SellerOrders({ orders, createNotif }) {
 
   async function confirmPickup(o) {
     if (!confirm("Konfirmasi hanya setelah pembeli sudah datang dan mengambil pesanan. Lanjutkan?")) return;
-    await updateDoc(doc(db, "orders", o.id), { statusPesanan: "selesai", updatedAt: new Date(), pickupConfirmedAt: serverTimestamp(), receivedAt: serverTimestamp(), updatedAt: serverTimestamp() });
+    await updateDoc(doc(db, "orders", o.id), { statusPesanan: "selesai", pickupConfirmedAt: serverTimestamp(), receivedAt: serverTimestamp(), updatedAt: serverTimestamp() });
     await createNotif({ role: "buyer", userId: o.buyerId, type: "order_done", title: "Pesanan Diambil", message: `Pesanan ${o.productName} sudah dikonfirmasi seller. Silakan beri ulasan bintang dan komentar.`, orderId: o.id });
     alert("Pesanan ambil di tempat sudah dikonfirmasi. Buyer akan diminta beri ulasan.");
   }
