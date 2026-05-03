@@ -45,6 +45,11 @@ function getOrderMillis(item) {
     getMillis(item?.updatedAt),
     getMillis(item?.paymentProofUploadedAt),
     getMillis(item?.processedAt),
+    getMillis(item?.shippingQuotedAt),
+    getMillis(item?.verifiedAt),
+    getMillis(item?.cancelRequestedAt),
+    getMillis(item?.cancelApprovedAt),
+    getMillis(item?.cancelRejectedAt),
     getMillis(item?.shippedAt),
     getMillis(item?.receivedAt)
   );
@@ -54,6 +59,35 @@ function sortNewest(items) {
   return [...items].sort((a, b) => {
     const diff = getOrderMillis(b) - getOrderMillis(a);
     if (diff !== 0) return diff;
+    return String(b.id || "").localeCompare(String(a.id || ""));
+  });
+}
+
+
+function getOrderStatusRank(order) {
+  const status = order?.statusPesanan || order?.statusPembayaran || "";
+  const rank = {
+    pembatalan_diajukan: 0,
+    menunggu_ongkir: 1,
+    menunggu_pembayaran: 2,
+    menunggu_verifikasi: 3,
+    sudah_dibayar: 4,
+    pesanan_masuk: 5,
+    diproses: 6,
+    dikirim: 7,
+    selesai: 8,
+    dibatalkan: 9,
+    ditolak: 10,
+  };
+  return rank[status] ?? 99;
+}
+
+function sortOrdersByStage(items = []) {
+  return [...items].sort((a, b) => {
+    const stageDiff = getOrderStatusRank(a) - getOrderStatusRank(b);
+    if (stageDiff !== 0) return stageDiff;
+    const timeDiff = getOrderMillis(b) - getOrderMillis(a);
+    if (timeDiff !== 0) return timeDiff;
     return String(b.id || "").localeCompare(String(a.id || ""));
   });
 }
@@ -443,7 +477,7 @@ export default function App() {
 
   useEffect(() => {
     const unsub = onSnapshot(collection(db, "orders"), (snap) => {
-      setOrders(sortNewest(snap.docs.map((d) => ({ id: d.id, ...d.data() }))));
+      setOrders(sortOrdersByStage(snap.docs.map((d) => ({ id: d.id, ...d.data() }))));
     }, (error) => {
       console.error("Orders realtime error:", error);
       setOrders([]);
@@ -778,7 +812,7 @@ export default function App() {
       {page === "login" && <LoginPage setPage={navGoTo} />}
       {page === "register" && <RegisterPage setPage={navGoTo} createNotif={createNotif} />}
       {page === "buyer" && profile?.role === "buyer" && (
-        <BuyerDashboard user={user} profile={profile} orders={orders.filter((o) => o.buyerId === user.uid)}
+        <BuyerDashboard user={user} profile={profile} orders={sortOrdersByStage(orders.filter((o) => o.buyerId === user.uid))}
           products={activeProducts} paymentSetting={paymentSetting} createNotif={createNotif}
           onAddToCart={addToCart} onProductClick={setSelectedProduct} setPage={navGoTo}
           onLogout={() => { signOut(auth); navGoTo("home"); }} />
@@ -786,12 +820,15 @@ export default function App() {
       {page === "seller" && profile?.role === "seller" && (
         <SellerDashboard user={user} profile={profile}
           products={products.filter((p) => p.sellerId === user.uid)}
-          orders={orders.filter((o) => o.sellerId === user.uid)}
+          orders={orders.filter((o) => {
+            const sellerProductIds = new Set(products.filter((p) => p.sellerId === user.uid).map((p) => p.id));
+            return o.sellerId === user.uid || sellerProductIds.has(o.productId);
+          })}
           wallets={wallets} commissionBills={commissionBills} paymentSetting={paymentSetting} commissionSetting={commissionSetting} chatUnread={unreadChat} createNotif={createNotif}
           onLogout={() => { signOut(auth); navGoTo("home"); }} />
       )}
       {page === "admin" && (profile?.role === "admin" || profile?.role === "sub_admin") && (
-        <AdminDashboard profile={profile} products={products} orders={orders} withdrawals={withdrawals}
+        <AdminDashboard profile={profile} products={products} orders={sortOrdersByStage(orders)} withdrawals={withdrawals}
           paymentSetting={paymentSetting} manualBalance={manualBalance} commissionSetting={commissionSetting} wallets={wallets} commissionBills={commissionBills} users={allUsers} createNotif={createNotif}
           onLogout={() => { signOut(auth); navGoTo("home"); }} />
       )}
@@ -1277,7 +1314,11 @@ function CheckoutModal({ cart, user, profile, onClose, onSuccess, createNotif })
         updatedAt: new Date().toISOString(),
       };
       if (needsAddress || form.shippingType === "same_day") {
-        try { localStorage.setItem(`umkm_last_shipping_address_${user.uid}`, JSON.stringify(addressToSave)); } catch {}
+        try {
+          localStorage.setItem(`umkm_last_shipping_address_${user.uid}`, JSON.stringify(addressToSave));
+        } catch (error) {
+          console.error("Gagal menyimpan alamat ke localStorage:", error);
+        }
         try {
           await setDoc(doc(db, "users", user.uid), { savedShippingAddress: addressToSave }, { merge: true });
         } catch (error) {
@@ -1929,11 +1970,7 @@ function SellerOrders({ orders, createNotif }) {
       updatedAt: serverTimestamp()
     });
     if (o.paymentMethod === "cash") {
-      try {
-        await createCashCommissionBill(o.id, { sellerId: o.sellerId, sellerName: o.sellerName || "", productName: o.productName, adminFee: o.adminFee }, createNotif);
-      } catch (error) {
-        console.error("Gagal membuat tagihan komisi tunai:", error);
-      }
+      await createCashCommissionBill(o.id, { sellerId: o.sellerId, sellerName: o.sellerName || "", productName: o.productName, adminFee: o.adminFee }, createNotif);
     }
     await createNotif({ role: "buyer", userId: o.buyerId, type: "shipping_quote_ready", title: "Ongkir Sudah Dihitung", message: `Ongkir ${o.productName} adalah ${rupiah(cost)}. Silakan lanjutkan pembayaran.`, orderId: o.id });
     alert("Ongkir dikirim ke buyer");
@@ -2606,7 +2643,7 @@ function AdminOrders({ orders, createNotif }) {
 
   async function approveCancel(o) {
     if (!confirm("Setujui pembatalan pesanan ini?")) return;
-    await updateDoc(doc(db, "orders", o.id), { statusPesanan: "dibatalkan", cancelStatus: "approved", cancelApprovedAt: serverTimestamp(), updatedAt: serverTimestamp() });
+    await updateDoc(doc(db, "orders", o.id), { statusPesanan: "dibatalkan", cancelStatus: "approved", cancelApprovedAt: serverTimestamp(), updatedAt: serverTimestamp(), cancelApprovedAt: serverTimestamp(), updatedAt: serverTimestamp() });
     await createNotif({ role: "buyer", userId: o.buyerId, type: "order_cancel_approved", title: "Pembatalan Disetujui", message: `Pembatalan pesanan ${o.productName} disetujui admin.`, orderId: o.id });
     await createNotif({ role: "seller", userId: o.sellerId, type: "order_cancel_approved", title: "Pesanan Dibatalkan", message: `Pesanan ${o.productName} dibatalkan oleh admin atas pengajuan buyer.`, orderId: o.id });
     alert("Pembatalan pesanan disetujui");
@@ -2615,7 +2652,7 @@ function AdminOrders({ orders, createNotif }) {
   async function rejectCancel(o) {
     if (!confirm("Tolak pengajuan pembatalan ini?")) return;
     const backStatus = o.paymentMethod === "cash" || o.statusPembayaran === "tunai" ? "pesanan_masuk" : (o.statusPembayaran === "sudah_dibayar" ? "pesanan_masuk" : "menunggu_pembayaran");
-    await updateDoc(doc(db, "orders", o.id), { statusPesanan: backStatus, cancelRequest: false, cancelStatus: "rejected", cancelRejectedAt: serverTimestamp(), updatedAt: serverTimestamp() });
+    await updateDoc(doc(db, "orders", o.id), { statusPesanan: backStatus, cancelRequest: false, cancelStatus: "rejected", cancelRejectedAt: serverTimestamp(), updatedAt: serverTimestamp(), cancelRejectedAt: serverTimestamp(), updatedAt: serverTimestamp() });
     await createNotif({ role: "buyer", userId: o.buyerId, type: "order_cancel_rejected", title: "Pembatalan Ditolak", message: `Pengajuan pembatalan ${o.productName} ditolak admin. Pesanan dilanjutkan.`, orderId: o.id });
     await createNotif({ role: "seller", userId: o.sellerId, type: "order_cancel_rejected", title: "Pembatalan Ditolak", message: `Pesanan ${o.productName} tetap dilanjutkan.`, orderId: o.id });
     alert("Pengajuan pembatalan ditolak");
