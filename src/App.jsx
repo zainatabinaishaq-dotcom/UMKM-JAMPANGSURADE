@@ -162,6 +162,10 @@ async function autoDeductCommissionBills(sellerId, createNotif) {
   if (!sellerId) return;
   const walletRef = doc(db, "seller_wallets", sellerId);
   const walletSnap = await getDoc(walletRef);
+  if (!walletSnap.exists()) {
+    await setDoc(walletRef, { sellerId, saldoTersedia: 0, saldoTertahan: 0, totalPenjualan: 0, totalDitarik: 0, updatedAt: serverTimestamp() }, { merge: true });
+    return;
+  }
   let saldo = Number(walletSnap.data()?.saldoTersedia || 0);
   if (saldo <= 0) return;
 
@@ -418,13 +422,122 @@ async function resolveCheckoutProduct(item) {
   return merged;
 }
 
+
+function paymentMethodLabel(method) {
+  const m = String(method || "").toLowerCase();
+  if (m === "cash" || m === "tunai") return "Tunai / Cash";
+  if (m === "transfer") return "Transfer";
+  return method || "Belum dipilih";
+}
+
+function canBuyerCancelOrder(order) {
+  const statusPesanan = order?.statusPesanan || "";
+  const statusPembayaran = order?.statusPembayaran || "";
+  const shippingType = order?.shippingType || "";
+  const paymentMethod = order?.paymentMethod || "";
+
+  if (!order?.id) return false;
+  if (["dikirim", "selesai", "dibatalkan", "ditolak", "pembatalan_diajukan"].includes(statusPesanan)) return false;
+  if (["sudah_dibayar", "approved", "paid"].includes(statusPembayaran)) return false;
+  if (shippingType === "same_day" && paymentMethod === "transfer" && statusPesanan === "dikirim") return false;
+  if (["jne", "pos", "tiki", "jnt", "sicepat"].includes(shippingType) && paymentMethod === "transfer" && ["sudah_dibayar", "approved", "paid"].includes(statusPembayaran)) return false;
+  return true;
+}
+
+async function creditSellerBalanceOnce(orderId, orderData) {
+  if (!orderId || !orderData?.sellerId) return;
+  if (orderData.balanceCredited === true) return;
+
+  const sellerAmount = Number(orderData.sellerAmount || 0);
+  const productTotal = Number(orderData.productTotal || 0);
+  if (sellerAmount <= 0) return;
+
+  const walletRef = doc(db, "seller_wallets", orderData.sellerId);
+  const walletSnap = await getDoc(walletRef);
+
+  if (!walletSnap.exists()) {
+    await setDoc(walletRef, {
+      sellerId: orderData.sellerId,
+      sellerName: orderData.sellerName || "",
+      saldoTersedia: 0,
+      saldoTertahan: 0,
+      totalPenjualan: 0,
+      totalDitarik: 0,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    }, { merge: true });
+  }
+
+  const batch = writeBatch(db);
+  batch.set(walletRef, {
+    sellerId: orderData.sellerId,
+    sellerName: orderData.sellerName || "",
+    saldoTersedia: increment(sellerAmount),
+    totalPenjualan: increment(productTotal),
+    updatedAt: serverTimestamp(),
+  }, { merge: true });
+
+  batch.set(doc(collection(db, "wallet_transactions")), {
+    sellerId: orderData.sellerId,
+    orderId,
+    type: "order_completed_credit",
+    amount: sellerAmount,
+    productTotal,
+    adminFee: Number(orderData.adminFee || 0),
+    note: "Saldo seller masuk setelah pesanan selesai",
+    createdAt: serverTimestamp(),
+  });
+
+  batch.update(doc(db, "orders", orderId), {
+    balanceCredited: true,
+    balanceCreditedAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+  });
+
+  await batch.commit();
+}
+
+async function completeOrderAndCreditSeller(order, extra = {}) {
+  if (!order?.id) return;
+  await updateDoc(doc(db, "orders", order.id), {
+    statusPesanan: "selesai",
+    receivedAt: serverTimestamp(),
+    soldCounted: true,
+    updatedAt: serverTimestamp(),
+    ...extra,
+  });
+
+  await creditSellerBalanceOnce(order.id, { ...order, statusPesanan: "selesai", ...extra });
+
+  if (order.productId && !order.soldCounted) {
+    try {
+      await setDoc(doc(db, "products", order.productId), {
+        soldCount: increment(Number(order.quantity || 1)),
+        totalSold: increment(Number(order.quantity || 1)),
+        updatedAt: serverTimestamp(),
+      }, { merge: true });
+    } catch (error) {
+      console.error("Gagal update jumlah terjual:", error);
+    }
+  }
+}
+
 function scrollToTopSmooth() {
   window.scrollTo({ top: 0, behavior: "smooth" });
 }
 export default function App() {
   const [user, setUser] = useState(null);
   const [profile, setProfile] = useState(null);
-  const [page, setPage] = useState("home");
+  const [page, setPage] = useState(() => {
+    try {
+      const pendingPage = sessionStorage.getItem("umkm_pending_page");
+      if (pendingPage) {
+        sessionStorage.removeItem("umkm_pending_page");
+        return pendingPage;
+      }
+    } catch {}
+    return "home";
+  });
   const [products, setProducts] = useState([]);
   const [orders, setOrders] = useState([]);
   const [reviews, setReviews] = useState([]);
@@ -672,7 +785,17 @@ export default function App() {
     );
   }
 
-  function navGoTo(p) { setPage(p); setShowCart(false); setSelectedProduct(null); }
+  function navGoTo(p) {
+    try {
+      sessionStorage.setItem("umkm_pending_page", p);
+      window.location.reload();
+      return;
+    } catch (error) {
+      setPage(p);
+      setShowCart(false);
+      setSelectedProduct(null);
+    }
+  }
 
   return (
     <div style={{ minHeight: "100vh", background: "var(--bg)" }}>
@@ -1646,7 +1769,7 @@ function BuyerOrderCard({ order, createNotif, paymentSetting }) {
         </div>
       </div>
       {order.paymentProofUrl && <div style={{ marginTop: 10 }}><img src={order.paymentProofUrl} alt="Bukti" style={{ width: 180, height: 120, objectFit: "cover", borderRadius: 8 }} /></div>}
-      {order.statusPesanan === "menunggu_pembayaran" &&
+      {canBuyerCancelOrder(order) &&
         order.statusPembayaran !== "menunggu_ongkir" &&
         !order.proofSubmitted &&
         !order.paymentProofUrl &&
@@ -2713,7 +2836,7 @@ function AdminOrders({ orders, createNotif }) {
   const filtered = filter === "all" ? sortedOrders : sortedOrders.filter((o) => o.statusPembayaran === filter || o.statusPesanan === filter);
 
   async function approve(o) {
-    await updateDoc(doc(db, "orders", o.id), { statusPembayaran: "sudah_dibayar", statusPesanan: "pesanan_masuk", showToSeller: true, updatedAt: serverTimestamp() });
+    await updateDoc(doc(db, "orders", o.id), { statusPembayaran: "sudah_dibayar", statusPesanan: "pesanan_masuk", verifiedAt: serverTimestamp(), updatedAt: serverTimestamp(), showToSeller: true, updatedAt: serverTimestamp() });
     await setDoc(doc(db, "seller_wallets", o.sellerId), { sellerId: o.sellerId, saldoTersedia: increment(o.sellerAmount), totalPenjualan: increment(o.sellerAmount) }, { merge: true });
     await addDoc(collection(db, "wallet_transactions"), { sellerId: o.sellerId, orderId: o.id, amount: o.sellerAmount, type: "income", createdAt: serverTimestamp() });
     await autoDeductCommissionBills(o.sellerId, createNotif);
